@@ -411,6 +411,142 @@ std::vector<std::shared_ptr<Program>> create_random_programs(
     return programs;
 }
 
+std::vector<std::shared_ptr<Program>> create_benchmark_programs(
+    uint32_t num_programs,
+    CoreCoord worker_grid_size,
+    bool unique_per_program,
+    const std::unordered_set<CoreCoord>& active_eth_cores) {
+    constexpr uint32_t MAX_LOOP = 100;
+
+    CoreRange cr({0, 0}, {worker_grid_size.x - 1, worker_grid_size.y - 1});
+    CoreRangeSet cr_set(cr);
+
+    uint32_t max_cbs = MetalContext::instance().hal().get_arch_num_circular_buffers();
+    constexpr uint32_t l1_cb_test_budget = 1024 * 32;
+    uint32_t page_size = l1_cb_test_budget / max_cbs;
+
+    std::map<std::string, std::string> data_movement_defines = {{"DATA_MOVEMENT", "1"}};
+    std::map<std::string, std::string> compute_defines = {{"COMPUTE", "1"}};
+    std::map<std::string, std::string> erisc_defines = {{"ERISC", "1"}};
+
+    const std::string kernel_path =
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/unit_tests/command_queue/random_program.cpp";
+
+    std::vector<std::shared_ptr<Program>> programs;
+
+    for (uint32_t i = 0; i < num_programs; i++) {
+        Program& program = *programs.emplace_back(std::make_shared<Program>());
+
+        // unique_per_program: each program gets unique loop count via + i
+        // !unique_per_program: all programs share the same compile args
+        uint32_t brisc_outer = unique_per_program ? MAX_LOOP + i : MAX_LOOP;
+        uint32_t ncrisc_outer = unique_per_program ? MAX_LOOP + i : MAX_LOOP;
+        uint32_t trisc_outer = unique_per_program ? MAX_LOOP + i : MAX_LOOP;
+
+        // Always max CBs, max semaphores, max runtime args
+        auto [brisc_unique_rtargs, brisc_common_rtargs] = create_runtime_args(true);
+        auto [ncrisc_unique_rtargs, ncrisc_common_rtargs] = create_runtime_args(true);
+        auto [trisc_unique_rtargs, trisc_common_rtargs] = create_runtime_args(true);
+
+        std::vector<uint32_t> brisc_compile_args = {
+            brisc_outer,
+            MAX_LOOP,
+            MAX_LOOP,
+            max_cbs,
+            NUM_SEMAPHORES,
+            (uint32_t)brisc_unique_rtargs.size(),
+            (uint32_t)brisc_common_rtargs.size(),
+            page_size};
+        std::vector<uint32_t> ncrisc_compile_args = {
+            ncrisc_outer,
+            MAX_LOOP,
+            MAX_LOOP,
+            max_cbs,
+            NUM_SEMAPHORES,
+            (uint32_t)ncrisc_unique_rtargs.size(),
+            (uint32_t)ncrisc_common_rtargs.size(),
+            page_size};
+        std::vector<uint32_t> trisc_compile_args = {
+            trisc_outer,
+            MAX_LOOP,
+            MAX_LOOP,
+            max_cbs,
+            NUM_SEMAPHORES,
+            (uint32_t)trisc_unique_rtargs.size(),
+            (uint32_t)trisc_common_rtargs.size(),
+            page_size};
+
+        // Create CBs
+        for (uint32_t j = 0; j < max_cbs; j++) {
+            CircularBufferConfig cb_config = CircularBufferConfig(page_size * (j + 1), {{j, tt::DataFormat::Float16_b}})
+                                                 .set_page_size(j, page_size * (j + 1));
+            CreateCircularBuffer(program, cr_set, cb_config);
+        }
+
+        // Create Semaphores
+        for (uint32_t j = 0; j < NUM_SEMAPHORES; j++) {
+            CreateSemaphore(program, cr_set, j + 1);
+        }
+
+        // Always create all 3 kernel types on full grid
+        auto brisc_k = CreateKernel(
+            program,
+            kernel_path,
+            cr_set,
+            DataMovementConfig{
+                .processor = DataMovementProcessor::RISCV_0,
+                .noc = NOC::RISCV_0_default,
+                .compile_args = brisc_compile_args,
+                .defines = data_movement_defines});
+        SetRuntimeArgs(program, brisc_k, cr_set, brisc_unique_rtargs);
+        SetCommonRuntimeArgs(program, brisc_k, brisc_common_rtargs);
+
+        auto ncrisc_k = CreateKernel(
+            program,
+            kernel_path,
+            cr_set,
+            DataMovementConfig{
+                .processor = DataMovementProcessor::RISCV_1,
+                .noc = NOC::RISCV_1_default,
+                .compile_args = ncrisc_compile_args,
+                .defines = data_movement_defines});
+        SetRuntimeArgs(program, ncrisc_k, cr_set, ncrisc_unique_rtargs);
+        SetCommonRuntimeArgs(program, ncrisc_k, ncrisc_common_rtargs);
+
+        auto trisc_k = CreateKernel(
+            program,
+            kernel_path,
+            cr_set,
+            ComputeConfig{.math_approx_mode = false, .compile_args = trisc_compile_args, .defines = compute_defines});
+        SetRuntimeArgs(program, trisc_k, cr_set, trisc_unique_rtargs);
+        SetCommonRuntimeArgs(program, trisc_k, trisc_common_rtargs);
+
+        // Ethernet
+        if (!active_eth_cores.empty()) {
+            uint32_t erisc_outer = unique_per_program ? MAX_LOOP + i : MAX_LOOP;
+            auto [erisc_unique_rtargs, erisc_common_rtargs] = create_runtime_args(32, 0, 0, 0);
+            std::vector<uint32_t> erisc_compile_args = {
+                erisc_outer,
+                MAX_LOOP,
+                MAX_LOOP,
+                0,
+                NUM_SEMAPHORES,
+                (uint32_t)erisc_unique_rtargs.size(),
+                (uint32_t)erisc_common_rtargs.size(),
+                page_size};
+            for (auto& eth_core : active_eth_cores) {
+                auto erisc_k = CreateKernel(
+                    program,
+                    kernel_path,
+                    eth_core,
+                    EthernetConfig{.noc = NOC::NOC_0, .compile_args = erisc_compile_args, .defines = erisc_defines});
+                SetRuntimeArgs(program, erisc_k, eth_core, erisc_unique_rtargs);
+            }
+        }
+    }
+    return programs;
+}
+
 ScopedEnvVar::ScopedEnvVar(const char* name, const char* value) : name_(name) {
     // Save original value
     const char* original = std::getenv(name);
