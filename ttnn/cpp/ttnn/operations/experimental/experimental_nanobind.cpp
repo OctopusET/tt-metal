@@ -62,6 +62,7 @@
 #include "ttnn/operations/experimental/deepseek_prefill/dispatch/dispatch_nanobind.hpp"
 #include "ttnn/operations/experimental/deepseek_prefill/combine/combine_nanobind.hpp"
 #include "ttnn/operations/experimental/moe_dispatch_offsets/moe_dispatch_offsets_nanobind.hpp"
+#include "ttnn/operations/experimental/offset_cumsum/offset_cumsum_nanobind.hpp"
 
 namespace ttnn::operations::experimental {
 
@@ -119,6 +120,7 @@ void py_module(nb::module_& mod) {
     matmul::detail::bind_attn_matmul_from_cache(mod);
     matmul::detail::bind_group_attn_matmul(mod);
     moe_dispatch_offsets::detail::bind_experimental_moe_dispatch_offsets_operation(mod);
+    offset_cumsum::detail::bind_experimental_offset_cumsum_operation(mod);
 
     plusone::detail::bind_experimental_plusone_operation(mod);
     dropout::detail::bind_experimental_dropout_operation(mod);
