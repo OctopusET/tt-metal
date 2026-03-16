@@ -132,9 +132,6 @@ def test_accuracy_sdxl_img2img(
     timesteps,
     sigmas,
 ):
-    if image_resolution == (512, 512):
-        pytest.skip("Accuracy test on 512x512 image resolution is not yet supported for img2img pipeline.")
-
     start_from, num_prompts = evaluation_range
 
     assert (
@@ -186,7 +183,7 @@ def test_accuracy_sdxl_img2img(
     deviation_clip_score = statistics.stdev(scores)
     logger.info(f"Average directional similarity: {average_clip_score}")
 
-    model_name = "sdxl-img2img-tp" if use_cfg_parallel else "sdxl-img2img"
+    model_name = f"sdxl-img2img-{image_resolution[0]}" + ("-tp" if use_cfg_parallel else "")
     metadata = {
         "model_name": model_name,
         "device": get_device_name(),

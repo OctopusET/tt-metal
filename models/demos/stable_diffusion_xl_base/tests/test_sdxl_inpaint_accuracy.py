@@ -114,9 +114,6 @@ def test_accuracy_sdxl_inpaint(
     use_cfg_parallel,
     strength,
 ):
-    if image_resolution == (512, 512):
-        pytest.skip("Accuracy test on 512x512 image resolution is not yet supported for inpainting pipeline.")
-
     start_from, num_prompts = evaluation_range
     input_images, input_masks, prompts = get_dataset_for_inpainting_accuracy(num_prompts)
 
@@ -150,7 +147,7 @@ def test_accuracy_sdxl_inpaint(
 
     accuracy_metrics = calculate_accuracy_metrics(images, prompts, coco_statistics_path)
 
-    model_name = "sdxl-inpaint-tp" if use_cfg_parallel else "sdxl-inpaint"
+    model_name = f"sdxl-inpaint-{image_resolution[0]}" + ("-tp" if use_cfg_parallel else "")
     metadata = {
         "model_name": model_name,
         "device": get_device_name(),

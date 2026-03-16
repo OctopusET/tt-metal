@@ -137,9 +137,6 @@ def test_accuracy_sdxl(
     refiner_aesthetic_score,
     refiner_negative_aesthetic_score,
 ):
-    if image_resolution == (512, 512) and (vae_on_device or use_refiner):
-        pytest.skip("Accuracy test on 512x512 image resolution is only supported for UNet on device.")
-
     start_from, num_prompts = evaluation_range
 
     prompts = sdxl_get_prompts(
@@ -185,7 +182,11 @@ def test_accuracy_sdxl(
 
     accuracy_metrics = calculate_accuracy_metrics(images, prompts, coco_statistics_path)
 
-    model_name = ("sdxl-base-refiner" if use_refiner else "sdxl") + ("-tp" if use_cfg_parallel else "")
+    model_name = (
+        ("sdxl-base-refiner" if use_refiner else "sdxl")
+        + f"-{image_resolution[0]}"
+        + ("-tp" if use_cfg_parallel else "")
+    )
     metadata = {
         "model_name": model_name,
         "device": get_device_name(),
