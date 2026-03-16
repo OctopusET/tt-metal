@@ -22,7 +22,7 @@ from models.demos.deepseek_v3.utils.config_dataclass import (
     SavedWeight,
 )
 from models.demos.deepseek_v3.utils.config_helpers import (
-    COMPUTE_KERNEL_CONFIG_LOFI,
+    COMPUTE_KERNEL_CONFIG_HIFI2,
     SEQ_LEN_CHUNK_SIZE,
     dram_sharded_weight_config,
     even_int_div,
@@ -50,7 +50,7 @@ class MLP(AbstractModule):
     """
 
     WEIGHT_TORCH_DTYPE = torch.bfloat16
-    WEIGHT_DTYPE = ttnn.bfloat4_b
+    WEIGHT_DTYPE = ttnn.bfloat8_b
 
     @dataclass
     class ProgramConfigData(OpConfigBase):
@@ -180,7 +180,7 @@ class MLP(AbstractModule):
         linear_op_config = LinearConfig(
             input_tensor_b=FromWeightConfig(MeshDeviceStub(mesh_device.shape)),
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            compute_kernel_config=COMPUTE_KERNEL_CONFIG_LOFI,
+            compute_kernel_config=COMPUTE_KERNEL_CONFIG_HIFI2,
         )
 
         # Construct the config
@@ -293,7 +293,7 @@ class MLP(AbstractModule):
                     input_num_cores,
                     inner_num_cores,
                 ),
-                compute_kernel_config=COMPUTE_KERNEL_CONFIG_LOFI,
+                compute_kernel_config=COMPUTE_KERNEL_CONFIG_HIFI2,
             ),
             "w2": LinearConfig(
                 input_tensor_b=FromWeightConfig(MeshDeviceStub(mesh_device.shape)),
@@ -305,7 +305,7 @@ class MLP(AbstractModule):
                     inner_num_cores,
                     output_num_cores,
                 ),
-                compute_kernel_config=COMPUTE_KERNEL_CONFIG_LOFI,
+                compute_kernel_config=COMPUTE_KERNEL_CONFIG_HIFI2,
             ),
             "w3": LinearConfig(
                 input_tensor_b=FromWeightConfig(MeshDeviceStub(mesh_device.shape)),
@@ -317,7 +317,7 @@ class MLP(AbstractModule):
                     input_num_cores,
                     inner_num_cores,
                 ),
-                compute_kernel_config=COMPUTE_KERNEL_CONFIG_LOFI,
+                compute_kernel_config=COMPUTE_KERNEL_CONFIG_HIFI2,
             ),
             "mul": MulConfig(
                 memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
