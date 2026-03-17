@@ -30,6 +30,10 @@ private:
 HostTensor::HostTensor(DistributedHostBuffer buffer, TensorSpec spec, TensorTopology topology) :
     impl(std::make_unique<HostTensorImpl>(std::move(buffer), std::move(spec), std::move(topology))) {}
 
+HostTensor::HostTensor(HostTensor&& other, TensorSpec spec, TensorTopology topology) :
+    impl(std::make_unique<HostTensorImpl>(
+        std::move(const_cast<DistributedHostBuffer&>(other.impl->buffer())), std::move(spec), std::move(topology))) {}
+
 HostTensor::HostTensor(const HostTensor& other) : impl(std::make_unique<HostTensorImpl>(*other.impl)) {}
 
 HostTensor& HostTensor::operator=(const HostTensor& other) {
