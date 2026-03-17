@@ -27,6 +27,8 @@ def _demo_case(
     sample_on_device: bool,
     artifact_name: str | None,
     profile_decode: bool,
+    stop_at_eos: bool | None,
+    expect_full_length: bool,
     case_id: str,
     marks=None,
 ):
@@ -41,6 +43,8 @@ def _demo_case(
             "sample_on_device": sample_on_device,
             "artifact_name": artifact_name,
             "profile_decode": profile_decode,
+            "stop_at_eos": stop_at_eos,
+            "expect_full_length": expect_full_length,
         },
         id=case_id,
         marks=marks,
@@ -48,17 +52,17 @@ def _demo_case(
 
 
 # Test matrix:
-# +------------------+-------------+----------------+----------------+---------------------+--------------+------------------+--------------------------+----------------+
-# | id               | max_prompts | max_users_per_row | repeat_batches | max_new_tokens | override_num_layers | enable_trace | sample_on_device | artifact_name            | profile_decode |
-# +------------------+-------------+-------------------+----------------+----------------+---------------------+--------------+------------------+--------------------------+----------------+
-# | tg_light_stress  | 56          | 32                | 2              | 128            | 5                   | True         | True             | None                     | False          |
-# | tg_upr8          | 32          | 8                 | 2              | 128            | 5                   | True         | True             | None                     | False          |
-# | dual_full_demo   | 256         | 32                | 1              | 129            | None                | True         | True             | dual_demo_full_results   | False          |
-# | dual_stress_demo | 56          | 32                | 20             | 129            | None                | True         | True             | dual_demo_stress_results | False          |
-# | quad_full_demo   | 512         | 32                | 1              | 129            | None                | True         | True             | quad_demo_full_results   | False          |
-# | quad_stress_demo | 56          | 32                | 20             | 129            | None                | True         | True             | quad_demo_stress_results | False          |
-# | profile_decode   | 1           | 32                | 1              | 13             | 5                   | True         | True             | None                     | True           |
-# +------------------+-------------+-------------------+----------------+----------------+---------------------+--------------+------------------+--------------------------+----------------+
+# +------------------+-------------+-------------------+----------------+----------------+---------------------+--------------+------------------+--------------------------+----------------+-------------+--------------------+
+# | id               | max_prompts | max_users_per_row | repeat_batches | max_new_tokens | override_num_layers | enable_trace | sample_on_device | artifact_name            | profile_decode | stop_at_eos | expect_full_length |
+# +------------------+-------------+-------------------+----------------+----------------+---------------------+--------------+------------------+--------------------------+----------------+-------------+--------------------+
+# | tg_stress        | 56          | 32                | 2              | 128            | 5                   | False        | True             | None                     | False          | False       | True               |
+# | tg_upr8          | 32          | 8                 | 2              | 128            | 5                   | True         | True             | None                     | False          | False       | True               |
+# | dual_full_demo   | 256         | 32                | 1              | 129            | None                | True         | True             | dual_demo_full_results   | False          | None        | False              |
+# | dual_stress_demo | 56          | 32                | 20             | 129            | None                | True         | True             | dual_demo_stress_results | False          | False       | True               |
+# | quad_full_demo   | 512         | 32                | 1              | 129            | None                | True         | True             | quad_demo_full_results   | False          | None        | False              |
+# | quad_stress_demo | 56          | 32                | 20             | 129            | None                | True         | True             | quad_demo_stress_results | False          | False       | True               |
+# | profile_decode   | 1           | 32                | 1              | 13             | 5                   | True         | True             | None                     | True           | False       | True               |
+# +------------------+-------------+-------------------+----------------+----------------+---------------------+--------------+------------------+--------------------------+----------------+-------------+--------------------+
 
 
 @pytest.mark.parametrize(
@@ -70,11 +74,13 @@ def _demo_case(
             repeat_batches=2,
             max_new_tokens=128,
             override_num_layers=5,
-            enable_trace=True,
+            enable_trace=False,
             sample_on_device=True,
             artifact_name=None,
             profile_decode=False,
-            case_id="tg_light_stress",
+            stop_at_eos=False,
+            expect_full_length=True,
+            case_id="tg_stress",
             marks=pytest.mark.requires_device(["TG"]),
         ),
         _demo_case(
@@ -87,6 +93,8 @@ def _demo_case(
             sample_on_device=True,
             artifact_name=None,
             profile_decode=False,
+            stop_at_eos=False,
+            expect_full_length=True,
             case_id="tg_upr8",
             marks=pytest.mark.requires_device(["TG"]),
         ),
@@ -99,6 +107,8 @@ def _demo_case(
             sample_on_device=True,
             artifact_name="dual_demo_full_results",
             profile_decode=False,
+            stop_at_eos=None,
+            expect_full_length=False,
             case_id="dual_full_demo",
             marks=[pytest.mark.requires_device(["DUAL"]), pytest.mark.timeout(2400)],
         ),
@@ -111,6 +121,8 @@ def _demo_case(
             sample_on_device=True,
             artifact_name="dual_demo_stress_results",
             profile_decode=False,
+            stop_at_eos=False,
+            expect_full_length=True,
             case_id="dual_stress_demo",
             marks=[pytest.mark.requires_device(["DUAL"]), pytest.mark.timeout(5400)],
         ),
@@ -123,6 +135,8 @@ def _demo_case(
             sample_on_device=True,
             artifact_name="quad_demo_full_results",
             profile_decode=False,
+            stop_at_eos=None,
+            expect_full_length=False,
             case_id="quad_full_demo",
             marks=[pytest.mark.requires_device(["QUAD"]), pytest.mark.timeout(3600)],
         ),
@@ -135,6 +149,8 @@ def _demo_case(
             sample_on_device=True,
             artifact_name="quad_demo_stress_results",
             profile_decode=False,
+            stop_at_eos=False,
+            expect_full_length=True,
             case_id="quad_stress_demo",
             marks=[pytest.mark.requires_device(["QUAD"]), pytest.mark.timeout(5400)],
         ),
@@ -147,6 +163,8 @@ def _demo_case(
             sample_on_device=True,
             artifact_name=None,
             profile_decode=True,
+            stop_at_eos=False,
+            expect_full_length=True,
             case_id="profile_decode",
             marks=pytest.mark.timeout(1800),
         ),
@@ -176,6 +194,8 @@ def test_demo(case: dict, force_recalculate_weight_config: bool):
     )
     if case["override_num_layers"] is not None:
         run_kwargs["override_num_layers"] = case["override_num_layers"]
+    if case["stop_at_eos"] is not None:
+        run_kwargs["stop_at_eos"] = case["stop_at_eos"]
 
     results = run_demo(**run_kwargs)
 
@@ -183,10 +203,15 @@ def test_demo(case: dict, force_recalculate_weight_config: bool):
     assert requested_system_name is not None, "MESH_DEVICE must be set for demo tests"
     mesh_shape = system_name_to_mesh_shape(requested_system_name.upper())
     expected_generations = min(len(prompts), case["max_users_per_row"] * int(mesh_shape[0]))
-
-    # Check output
     assert len(results["generations"]) == expected_generations
-    assert len(results["generations"][0]["tokens"]) == case["max_new_tokens"]
+
+    # Full-demo cases can stop early on EOS; stress/profile cases disable EOS and
+    # should always produce the requested token count.
+    generated_lengths = [len(generation["tokens"]) for generation in results["generations"]]
+    if case["expect_full_length"]:
+        assert all(length == case["max_new_tokens"] for length in generated_lengths)
+    else:
+        assert all(length <= case["max_new_tokens"] for length in generated_lengths)
 
     # Save results to JSON for artifact upload (QUAD tests only)
     if case["artifact_name"] is not None:
