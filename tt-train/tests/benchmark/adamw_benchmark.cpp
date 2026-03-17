@@ -42,22 +42,17 @@ const std::vector<AdamWShape> adamw_shapes = {
 };
 
 ttnn::Tensor make_random_tensor(
-    const ttnn::Shape& shape, ttnn::DataType dtype, ttnn::distributed::MeshDevice* device, uint32_t seed) {
+    const ttnn::Shape& shape,
+    ttnn::DataType dtype,
+    ttnn::distributed::MeshDevice* device,
+    uint32_t seed,
+    float min = -1.0f,
+    float max = 1.0f) {
     std::vector<float> data(shape.volume());
     ttml::core::parallel_generate(
-        std::span{data.data(), data.size()}, []() { return std::uniform_real_distribution<float>(-1.0f, 1.0f); }, seed);
-    return ttnn::Tensor::from_vector(
-        data,
-        ttnn::TensorSpec(
-            shape, tt::tt_metal::TensorLayout(dtype, tt::tt_metal::Layout::TILE, ttnn::DRAM_MEMORY_CONFIG)),
-        device);
-}
-
-ttnn::Tensor make_positive_tensor(
-    const ttnn::Shape& shape, ttnn::DataType dtype, ttnn::distributed::MeshDevice* device, uint32_t seed) {
-    std::vector<float> data(shape.volume());
-    ttml::core::parallel_generate(
-        std::span{data.data(), data.size()}, []() { return std::uniform_real_distribution<float>(0.0f, 1.0f); }, seed);
+        std::span{data.data(), data.size()},
+        [min, max]() { return std::uniform_real_distribution<float>(min, max); },
+        seed);
     return ttnn::Tensor::from_vector(
         data,
         ttnn::TensorSpec(
@@ -85,7 +80,7 @@ void BM_AdamW(benchmark::State& state) {
     auto param = make_random_tensor(shape, dtype, device.get(), seed);
     auto grad = make_random_tensor(shape, dtype, device.get(), seed + 1);
     auto exp_avg = make_random_tensor(shape, dtype, device.get(), seed + 2);
-    auto exp_avg_sq = make_positive_tensor(shape, dtype, device.get(), seed + 3);
+    auto exp_avg_sq = make_random_tensor(shape, dtype, device.get(), seed + 3, 0.0f, 1.0f);
 
     constexpr float lr = 1e-3f;
     constexpr float beta1 = 0.9f;
