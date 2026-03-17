@@ -17,7 +17,8 @@ public:
     HostTensorImpl& operator=(HostTensorImpl&& other) noexcept = default;
     ~HostTensorImpl() = default;
 
-    const DistributedHostBuffer& buffer() const { return buffer_; }
+    const DistributedHostBuffer& buffer() const& { return buffer_; }
+    DistributedHostBuffer buffer() const&& { return buffer_; }
     const TensorSpec& spec() const { return spec_; }
     const TensorTopology& topology() const { return topology_; }
 
@@ -31,8 +32,7 @@ HostTensor::HostTensor(DistributedHostBuffer buffer, TensorSpec spec, TensorTopo
     impl(std::make_unique<HostTensorImpl>(std::move(buffer), std::move(spec), std::move(topology))) {}
 
 HostTensor::HostTensor(HostTensor&& other, TensorSpec spec, TensorTopology topology) :
-    impl(std::make_unique<HostTensorImpl>(
-        std::move(const_cast<DistributedHostBuffer&>(other.impl->buffer())), std::move(spec), std::move(topology))) {}
+    impl(std::make_unique<HostTensorImpl>(other.impl->buffer(), std::move(spec), std::move(topology))) {}
 
 HostTensor::HostTensor(const HostTensor& other) : impl(std::make_unique<HostTensorImpl>(*other.impl)) {}
 
