@@ -140,6 +140,9 @@ jobs:
               pytest models/demos/deepseek_v3_d_p/tests/pcc/test_reduce.py -vvv --tb=short
               pytest models/demos/deepseek_v3_d_p/tests/pcc/test_torch_dispatch_combine.py -vvv --tb=short
               pytest models/demos/deepseek_v3_d_p/tests/pcc/test_ttnn_dispatch_combine.py -vvv --tb=short
+              pytest models/demos/deepseek_v3_d_p/tests/pcc/test_moe_gate_prefill2d.py -vvv --tb=short
+              pytest models/demos/deepseek_v3_d_p/tests/pcc/test_masked_bincount.py -vvv --tb=short
+              pytest models/demos/deepseek_v3_d_p/tests/pcc/test_offset_cumsum.py -vvv --tb=short
             timeout: 15
             test-type: qb
             owner_id: U08E1JCMAJF # Marko Bezulj
