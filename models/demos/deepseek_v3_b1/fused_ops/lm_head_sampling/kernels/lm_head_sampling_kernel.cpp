@@ -273,6 +273,7 @@ void kernel_main() {
     };
 
     // ── MTP: EH DRAM streaming matmul reader (eh_matmul_core) ───────
+#if 0  // DEBUG: EH matmul disabled
     constexpr uint32_t eh_in1_cb = get_named_compile_time_arg_val("matmul_eh_in1");
     constexpr uint32_t eh_out_cb = get_named_compile_time_arg_val("matmul_eh_out");
     constexpr uint32_t eh_out_w = get_named_compile_time_arg_val("matmul_eh_out_w");
@@ -290,6 +291,7 @@ void kernel_main() {
         get_named_compile_time_arg_val("matmul_eh_num_subblocks_k"),
         get_named_compile_time_arg_val("matmul_eh_bank_id"),
         get_named_compile_time_arg_val("matmul_eh_vc")>;
+#endif
 
 #elif defined(COMPILE_FOR_BRISC)
     // ========================================================================
@@ -464,6 +466,7 @@ void kernel_main() {
     };
 
     // ── MTP: EH DRAM streaming matmul compute (eh_matmul_core) ──────
+#if 0  // DEBUG: EH matmul disabled
     constexpr uint32_t eh_in0_cb = get_named_compile_time_arg_val("matmul_eh_in0");
     constexpr uint32_t eh_in1_cb = get_named_compile_time_arg_val("matmul_eh_in1");
     constexpr uint32_t eh_out_cb = get_named_compile_time_arg_val("matmul_eh_out");
@@ -480,6 +483,7 @@ void kernel_main() {
         1,
         0,
         0>;
+#endif
 
     compute_kernel_hw_startup(0, 0, 0);
 #endif
@@ -504,12 +508,7 @@ void kernel_main() {
     mcast_eh.init(mcast_eh_args);
     while (true) {
         iteration_count++;
-        if constexpr (Core::is_input_core) {
-            DPRINT << "LMH iter=" << iteration_count << " START" << ENDL();
-        }
-        if constexpr (Core::is_argmax_final_core) {
-            DPRINT << "MC iter=" << iteration_count << " START" << ENDL();
-        }
+
         // ====================================================================
         // Phase 0: CCL Broadcast (multi-device only)
         // ====================================================================
@@ -568,11 +567,29 @@ void kernel_main() {
         if constexpr (Core::is_input_core) {
             DPRINT << "LMH iter=" << iteration_count << " P0.5_RMSNORM" << ENDL();
         }
+#if defined(COMPILE_FOR_TRISC)
+        if constexpr (Core::is_input_core) {
+            constexpr uint32_t diag_in_cb = get_named_compile_time_arg_val("rmsnorm_input_cb");
+            uint32_t in_addr = get_tile_address(diag_in_cb, 0);
+            auto in_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(in_addr);
+            DPRINT << "T iter=" << iteration_count << " IN cb=" << diag_in_cb << " addr=" << in_addr
+                   << " d[0]=" << in_data[0] << " d[1]=" << in_data[1] << ENDL();
+        }
+#endif
         deepseek_b1_ops::RMSNorm::Op<RMSNormCTArgs, Core::is_rmsnorm_core, !Core::enable_mtp> rmsnorm;
         {
             DeviceZoneScopedN("RMSNORM");
             rmsnorm(rmsnorm_args);
         }
+#if defined(COMPILE_FOR_TRISC)
+        if constexpr (Core::is_input_core) {
+            constexpr uint32_t diag_out_cb = get_named_compile_time_arg_val("rmsnorm_output_cb");
+            uint32_t out_addr = get_tile_address(diag_out_cb, 0);
+            auto out_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(out_addr);
+            DPRINT << "T iter=" << iteration_count << " OUT cb=" << diag_out_cb << " addr=" << out_addr
+                   << " d[0]=" << out_data[0] << " d[1]=" << out_data[1] << ENDL();
+        }
+#endif
 
         // ====================================================================
         // Phase 1: Mcast — multicast input from sender core to all device cores
@@ -582,6 +599,7 @@ void kernel_main() {
             constexpr uint32_t mcast_src_cb_diag = get_named_compile_time_arg_val("mcast_src_cb");
             constexpr uint32_t mcast_src_num_pages_diag = get_named_compile_time_arg_val("mcast_src_num_pages");
             cb_wait_front(mcast_src_cb_diag, mcast_src_num_pages_diag);
+            invalidate_l1_cache();
             uint32_t cb8_wr = get_write_ptr(mcast_src_cb_diag);
             uint32_t cb8_rd = get_read_ptr(mcast_src_cb_diag);
             auto src_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(mcast_args.input_data_addr);
@@ -651,6 +669,13 @@ void kernel_main() {
                 DeviceZoneScopedN("MTP_H_RMSNORM");
                 h_rmsnorm(rmsnorm_args);
             }
+            if constexpr (Core::is_input_core) {
+                constexpr uint32_t h_out_cb = get_named_compile_time_arg_val("rmsnorm_h_output_cb");
+                uint32_t h_out_addr = get_tile_address(h_out_cb, 0);
+                auto h_out_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(h_out_addr);
+                DPRINT << "T iter=" << iteration_count << " H_OUT cb=" << h_out_cb << " addr=" << h_out_addr
+                       << " d[0]=" << h_out_data[0] << " d[1]=" << h_out_data[1] << ENDL();
+            }
         }
 #endif
 
@@ -708,11 +733,11 @@ void kernel_main() {
         // [MTP] Token transfer + Embedding lookup + e_rmsnorm + EH matmul
         // ====================================================================
 #if defined(COMPILE_FOR_NCRISC)
-        if constexpr (Core::is_matmul_core) {
-            constexpr uint32_t matmul_out_cb = get_named_compile_time_arg_val("matmul_out");
-            constexpr uint32_t out_w = get_named_compile_time_arg_val("matmul_out_w");
-            cb_pop_front(matmul_out_cb, out_w);
-        }
+        // if constexpr (Core::is_matmul_core) {
+        //     constexpr uint32_t matmul_out_cb = get_named_compile_time_arg_val("matmul_out");
+        //     constexpr uint32_t out_w = get_named_compile_time_arg_val("matmul_out_w");
+        //     cb_pop_front(matmul_out_cb, out_w);
+        // }
 
         // ================================================================
         // [MTP] Token transfer: argmax_final_core writes token to input_core
@@ -756,6 +781,7 @@ void kernel_main() {
                 .page_size = embedding_size_bytes,
             };
 
+            invalidate_l1_cache();
             uint32_t token_id = *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(mtp_token_addr);
             cb_reserve_back(emb_cb, e_num_tiles);
             uint64_t dram_addr = embedding_addr_gen.get_noc_addr(token_id);
@@ -810,11 +836,18 @@ void kernel_main() {
                 DeviceZoneScopedN("MTP_E_RMSNORM");
                 e_rmsnorm(rmsnorm_args);
             }
+            if constexpr (Core::is_input_core) {
+                constexpr uint32_t e_out_cb = get_named_compile_time_arg_val("rmsnorm_e_output_cb");
+                uint32_t e_out_addr = get_tile_address(e_out_cb, 0);
+                auto e_out_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(e_out_addr);
+                DPRINT << "T iter=" << iteration_count << " E_OUT cb=" << e_out_cb << " addr=" << e_out_addr
+                       << " d[0]=" << e_out_data[0] << " d[1]=" << e_out_data[1] << ENDL();
+            }
         }
 #endif
 
         // ====================================================================
-        // [MTP] EH matmul using DRAM streaming
+        // [MTP] EH matmul using DRAM streaming  [DEBUG: DISABLED]
         // ====================================================================
 #if defined(COMPILE_FOR_TRISC) || defined(COMPILE_FOR_NCRISC)
         if constexpr (Core::is_input_core) {
@@ -823,6 +856,7 @@ void kernel_main() {
         if constexpr (Core::is_argmax_final_core) {
             DPRINT << "MC iter=" << iteration_count << " MTP_EH_MATMUL" << ENDL();
         }
+#if 0  // DEBUG: skip EH matmul to isolate MTP compute state corruption
         if constexpr (Core::enable_mtp && Core::is_eh_matmul_core) {
             deepseek_b1_ops::DRAMStreamingMatmul::
                 Op<EHDRAMMMCTArgs, true, true, false, eh_cb_in1_buf_addr, false, false, 2>
@@ -832,16 +866,21 @@ void kernel_main() {
                 eh_matmul();
             }
         }
+#endif
         if constexpr (Core::is_argmax_final_core) {
             DPRINT << "MC iter=" << iteration_count << " MTP_EH_MATMUL_DONE" << ENDL();
         }
 #endif
 
 #if defined(COMPILE_FOR_NCRISC)
+#if 0  // DEBUG: matmul disabled — no output produced, nothing to pop
         if constexpr (Core::enable_mtp && Core::is_eh_matmul_core) {
             cb_pop_front(eh_out_cb, eh_out_w);
         }
-        if constexpr (Core::enable_mtp && Core::is_mcast_receiver_core && !Core::is_eh_matmul_core) {
+#endif
+        // Drain mcast_eh_dst_cb on ALL receiver cores (including eh_matmul_core,
+        // since the DRAMStreamingMatmul that would normally consume CB18 is disabled)
+        if constexpr (Core::enable_mtp && Core::is_mcast_receiver_core) {
             constexpr uint32_t mcast_eh_dst_cb_drain = get_named_compile_time_arg_val("mcast_eh_dst_cb");
             constexpr uint32_t mcast_eh_dst_pages_drain = get_named_compile_time_arg_val("mcast_eh_dst_num_pages");
             cb_wait_front(mcast_eh_dst_cb_drain, mcast_eh_dst_pages_drain);
