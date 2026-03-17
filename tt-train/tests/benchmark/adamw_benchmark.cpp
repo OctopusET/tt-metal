@@ -21,11 +21,11 @@ struct AdamWShape {
 };
 
 struct TestConfig {
-    int num_warmup_iterations = 3;
-    int num_measurement_iterations = 20;
+    uint32_t num_warmup_iterations = 3;
+    uint32_t num_measurement_iterations = 20;
 };
 
-const TestConfig test_config = {
+constexpr TestConfig test_config = {
     .num_warmup_iterations = 5,
     .num_measurement_iterations = 50,
 };
@@ -87,16 +87,16 @@ void BM_AdamW(benchmark::State& state) {
     auto exp_avg = make_random_tensor(shape, dtype, device.get(), seed + 2);
     auto exp_avg_sq = make_positive_tensor(shape, dtype, device.get(), seed + 3);
 
-    const float lr = 1e-3f;
-    const float beta1 = 0.9f;
-    const float beta2 = 0.999f;
+    constexpr float lr = 1e-3f;
+    constexpr float beta1 = 0.9f;
+    constexpr float beta2 = 0.999f;
     const float beta1_pow = std::pow(beta1, 10.0f);
     const float beta2_pow = std::pow(beta2, 10.0f);
-    const float epsilon = 1e-8f;
-    const float weight_decay = 0.01f;
+    constexpr float epsilon = 1e-8f;
+    constexpr float weight_decay = 0.01f;
 
     // Warmup
-    for (int i = 0; i < test_config.num_warmup_iterations; ++i) {
+    for (uint32_t i = 0; i < test_config.num_warmup_iterations; ++i) {
         auto result = ttml::metal::adamw(
             param,
             grad,
@@ -117,7 +117,7 @@ void BM_AdamW(benchmark::State& state) {
     for ([[maybe_unused]] auto _ : state) {
         auto total_time = std::chrono::duration<double>::zero();
 
-        for (int iter = 0; iter < test_config.num_measurement_iterations; ++iter) {
+        for (uint32_t iter = 0; iter < test_config.num_measurement_iterations; ++iter) {
             auto start = std::chrono::high_resolution_clock::now();
             auto result = ttml::metal::adamw(
                 param,
@@ -138,9 +138,9 @@ void BM_AdamW(benchmark::State& state) {
             result.deallocate();
         }
 
-        double avg_time_s = total_time.count() / test_config.num_measurement_iterations;
-        double time_us = avg_time_s * 1e6;
-        double gb_per_s = static_cast<double>(total_dram_bytes) / avg_time_s / 1e9;
+        const double avg_time_s = total_time.count() / test_config.num_measurement_iterations;
+        const double time_us = avg_time_s * 1e6;
+        const double gb_per_s = static_cast<double>(total_dram_bytes) / avg_time_s / 1e9;
 
         state.SetIterationTime(avg_time_s);
         state.counters["Shape"] = shape_index;
