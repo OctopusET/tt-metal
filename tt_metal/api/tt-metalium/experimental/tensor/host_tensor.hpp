@@ -26,9 +26,6 @@
 // Using namespace tt::tt_metal avoids double namespace renaming for the refactoring effort.
 namespace tt::tt_metal {
 
-// This will be brought in at #37692
-class HostStorage;
-
 // Implementation details for HostTensor
 class HostTensorImpl;
 
@@ -68,15 +65,9 @@ public:
      */
     HostTensor() = default;
 
-    // TODO(#38376), TODO(#38689):
-    // These constructors should be hidden or go away.
-    // External user should not be able to construct a HostTensor directly and opt to use the from_xxx static methods
-    // instead, as the constructor does not perform invariant checks.
-    explicit HostTensor(HostStorage storage, TensorSpec tensor_spec, TensorTopology tensor_topology);
+    explicit HostTensor(DistributedHostBuffer buffer, TensorSpec spec, TensorTopology topology);
 
-    explicit HostTensor(HostBuffer buffer, TensorSpec spec, TensorTopology topology);
-
-    ~HostTensor() = default;
+    ~HostTensor();
 
     /**
      * Copy constructor.
@@ -173,16 +164,12 @@ public:
      */
     const TensorTopology& tensor_topology() const;
 
-    // DeviceStorage is meant to bridge ttnn::Tensor and HostTensor,
-    // this should go away as part of refactoring, see: #38376
-    const HostStorage& get_legacy_host_storage() const;
-
     /**
      * Returns the DistributedHostBuffer of the HostTensor.
      *
      * pre-condition: The HostTensor must be engaged.
      */
-    const DistributedHostBuffer& get_distributed_host_buffer() const;
+    const DistributedHostBuffer& buffer() const;
 
     // Derivables:
 
@@ -210,7 +197,7 @@ public:
 
     // Questionables:
 
-    void update_tensor_topology(TensorTopology tensor_topology);
+    // void update_tensor_topology(TensorTopology tensor_topology);
 
 private:
     std::unique_ptr<HostTensorImpl> impl;
