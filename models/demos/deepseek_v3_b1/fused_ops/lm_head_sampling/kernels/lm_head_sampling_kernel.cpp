@@ -243,7 +243,7 @@ void kernel_main() {
     if constexpr (Core::is_input_core) {
         constexpr uint32_t rmsnorm_input_cb = get_named_compile_time_arg_val("rmsnorm_input_cb");
         constexpr uint32_t rmsnorm_num_tiles = get_named_compile_time_arg_val("rmsnorm_num_tiles");
-        if constexpr (!(Core::skip_ccl && Core::bcast_use_socket_input)) {
+        if constexpr (!(Core::skip_ccl && Core::bcast_use_socket_input) && !Core::persistent_mode) {
             unified_kernels::setup_sharded_buffer(rmsnorm_input_cb, rmsnorm_num_tiles);
         }
         constexpr uint32_t rmsnorm_gamma_cb = get_named_compile_time_arg_val("rmsnorm_gamma_cb");
@@ -553,9 +553,11 @@ void kernel_main() {
         if constexpr (Core::is_input_core && Core::persistent_mode) {
             constexpr uint32_t rmsnorm_input_cb = get_named_compile_time_arg_val("rmsnorm_input_cb");
             constexpr uint32_t rmsnorm_num_tiles = get_named_compile_time_arg_val("rmsnorm_num_tiles");
-            if (iteration_count > 1) {
-                unified_kernels::setup_sharded_buffer(rmsnorm_input_cb, rmsnorm_num_tiles);
-            }
+            unified_kernels::setup_sharded_buffer(rmsnorm_input_cb, rmsnorm_num_tiles);
+            uint32_t cb0_rd = get_read_ptr(rmsnorm_input_cb);
+            auto cb0_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cb0_rd);
+            DPRINT << "NCRISC iter=" << iteration_count << " bcast_dst=" << bcast_args.tensor_address0
+                   << " cb0_rd=" << cb0_rd << " d[0]=" << cb0_data[0] << " d[913]=" << cb0_data[913] << ENDL();
         }
 #endif
 
@@ -575,6 +577,19 @@ void kernel_main() {
         // ====================================================================
         // Phase 1: Mcast — multicast input from sender core to all device cores
         // ====================================================================
+#if defined(COMPILE_FOR_BRISC)
+        if constexpr (Core::is_input_core) {
+            constexpr uint32_t mcast_src_cb_diag = get_named_compile_time_arg_val("mcast_src_cb");
+            constexpr uint32_t mcast_src_num_pages_diag = get_named_compile_time_arg_val("mcast_src_num_pages");
+            cb_wait_front(mcast_src_cb_diag, mcast_src_num_pages_diag);
+            uint32_t cb8_wr = get_write_ptr(mcast_src_cb_diag);
+            uint32_t cb8_rd = get_read_ptr(mcast_src_cb_diag);
+            auto src_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(mcast_args.input_data_addr);
+            DPRINT << "BRISC iter=" << iteration_count << " rd=" << cb8_rd << " wr=" << cb8_wr
+                   << " src=" << mcast_args.input_data_addr << " dst=" << mcast_args.mcast_receiver_data_addr
+                   << " d[0]=" << src_data[0] << " d[1]=" << src_data[1] << ENDL();
+        }
+#endif
         if constexpr (Core::is_input_core) {
             DPRINT << "LMH iter=" << iteration_count << " P1_MCAST" << ENDL();
         }
@@ -586,6 +601,15 @@ void kernel_main() {
         // ====================================================================
         // Phase 2: Matmul — each matmul core computes local GEMM with its weight shard
         // ====================================================================
+#if defined(COMPILE_FOR_NCRISC)
+        if constexpr (Core::is_argmax_final_core) {
+            constexpr uint32_t diag_dst_cb = get_named_compile_time_arg_val("mcast_dst_cb");
+            uint32_t cb1_rd = get_read_ptr(diag_dst_cb);
+            auto cb1_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cb1_rd);
+            DPRINT << "MCNR iter=" << iteration_count << " cb1=" << cb1_rd << " d[0]=" << cb1_data[0]
+                   << " d[1]=" << cb1_data[1] << ENDL();
+        }
+#endif
         if constexpr (Core::is_input_core) {
             DPRINT << "LMH iter=" << iteration_count << " P2_MATMUL" << ENDL();
         }
@@ -599,6 +623,17 @@ void kernel_main() {
         if constexpr (Core::is_argmax_final_core) {
             DPRINT << "MC iter=" << iteration_count << " P2_MATMUL_DONE" << ENDL();
         }
+#if defined(COMPILE_FOR_NCRISC)
+        if constexpr (Core::is_argmax_final_core) {
+            constexpr uint32_t diag_out_cb = get_named_compile_time_arg_val("matmul_out");
+            constexpr uint32_t diag_out_w = get_named_compile_time_arg_val("matmul_out_w");
+            cb_wait_front(diag_out_cb, diag_out_w);
+            uint32_t cb16_rd = get_read_ptr(diag_out_cb);
+            auto cb16_data = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cb16_rd);
+            DPRINT << "MCNR iter=" << iteration_count << " cb16=" << cb16_rd << " d[0]=" << cb16_data[0]
+                   << " d[1]=" << cb16_data[1] << ENDL();
+        }
+#endif
 
         // ====================================================================
         // [MTP] h_rmsnorm on TRISC — starts immediately after the LM head matmul,
@@ -673,9 +708,11 @@ void kernel_main() {
         // [MTP] Token transfer + Embedding lookup + e_rmsnorm + EH matmul
         // ====================================================================
 #if defined(COMPILE_FOR_NCRISC)
-        // CB 16 (matmul_out) is popped internally by argmax.hpp (scores_cb pop).
-        // Do NOT pop it again here — double pop underflows the page counter and
-        // causes a hang after ~4 persistent iterations.
+        if constexpr (Core::is_matmul_core) {
+            constexpr uint32_t matmul_out_cb = get_named_compile_time_arg_val("matmul_out");
+            constexpr uint32_t out_w = get_named_compile_time_arg_val("matmul_out_w");
+            cb_pop_front(matmul_out_cb, out_w);
+        }
 
         // ================================================================
         // [MTP] Token transfer: argmax_final_core writes token to input_core

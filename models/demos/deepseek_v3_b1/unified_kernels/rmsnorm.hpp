@@ -22,6 +22,7 @@
 #include "api/compute/experimental/mul_reduce_scalar.h"
 #include "../kernel_includes/tt_metal/include/compute_kernel_api/add_rsqrt.h"
 #include "../kernel_includes/tt_metal/include/compute_kernel_api/rmsnorm.h"
+#include "../kernel_includes/tt_metal/include/compute_kernel_api/custom_mm.h"
 #endif
 
 namespace deepseek_b1_ops {
@@ -121,6 +122,7 @@ struct RMSNorm {
                 add_rsqrt_tile_init();
                 cb_wait_front(CTArgs::input_cb, num_tiles);
                 tile_regs_acquire();
+                custom_mm_block_zero_dest();
                 mul_reduce_scalar_tile<PoolType::SUM>(CTArgs::input_cb, CTArgs::input_cb, num_tiles, args.scalar);
                 mul_reduce_scalar_uninit();
             }

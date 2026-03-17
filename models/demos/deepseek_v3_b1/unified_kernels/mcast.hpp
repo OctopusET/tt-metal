@@ -368,7 +368,13 @@ struct Mcast {
                     mcast_is_shared_write_cmd_buf,
                     write_reg_cmd_buf>(args.data_sender_semaphore_addr, args.data_receiver_semaphore_addr, 4);
 
-                // Pop the source CB after sending
+                // Barrier: the posted mcast writes are still in-flight on
+                // the NOC engine, reading from the source L1.  We must wait
+                // for those reads to complete before popping, otherwise
+                // TRISC (or NCRISC) can immediately reserve the same CB and
+                // overwrite the source data while the DMA is still reading.
+                noc_async_write_barrier();
+
                 if constexpr (pop_src) {
                     cb_pop_front(args.src_cb, args.src_num_pages);
                 }
