@@ -92,4 +92,10 @@ std::size_t HostTensor::element_size() const {
 
 Strides HostTensor::strides() const { return tensor_spec().tensor_layout().compute_strides(logical_shape()); }
 
+HostTensor HostTensor::transform(const std::function<HostBuffer(const HostBuffer&)>& callable) const {
+    auto transformed_buffer =
+        buffer().transform(callable, DistributedHostBuffer::ProcessShardExecutionPolicy::PARALLEL);
+    return HostTensor(std::move(transformed_buffer), tensor_spec(), tensor_topology());
+}
+
 }  // namespace tt::tt_metal

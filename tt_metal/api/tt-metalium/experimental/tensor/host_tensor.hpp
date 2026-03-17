@@ -204,6 +204,9 @@ public:
 
     // Questionables:
 
+    // Applies a transformation function to each device buffer in parallel, returning a new HostTensor.
+    HostTensor transform(const std::function<HostBuffer(const HostBuffer&)>& callable) const;
+
     // void update_tensor_topology(TensorTopology tensor_topology);
 
 private:
