@@ -88,14 +88,8 @@ class MoE(SharedStateAddOn, AbstractModule):
         # optimized ops (exclusive to quad with ring fabric) use a different mapping format
         if is_ring_fabric(fabric_config) and num_dispatch_device_rows == 16:
             num_experts = num_devices * num_experts_per_device
-            tp_size = mesh_device.shape[1]
-            num_experts_per_cluster = num_experts // tp_size
-
-            e = torch.arange(num_experts, dtype=torch.int32)
             torch_expert_mapping_tensor = (
-                (((e % num_experts_per_cluster) // num_experts_per_device) * tp_size + (e // num_experts_per_cluster))
-                .unsqueeze(0)
-                .repeat(num_devices, 1)
+                (torch.arange(num_experts) // num_experts_per_device).unsqueeze(0).repeat(num_devices, 1)
             )
         else:
             torch_expert_mapping_tensor = (
