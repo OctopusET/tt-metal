@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -32,12 +31,6 @@ from models.demos.deepseek_v3.utils.run_config import (
 )
 from models.demos.deepseek_v3.utils.shared_state_addon import SharedStateAddOn
 from models.tt_transformers.tt.common import PagedAttentionConfig
-
-
-def get_fabric_config():
-    return (
-        ttnn.FabricConfig.FABRIC_1D_RING if (os.getenv("USE_TORUS_MODE") is not None) else ttnn.FabricConfig.FABRIC_1D
-    )
 
 
 class RowBatchedModel(SharedStateAddOn, AbstractModule):
