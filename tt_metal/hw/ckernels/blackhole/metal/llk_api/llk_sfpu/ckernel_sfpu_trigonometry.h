@@ -168,7 +168,7 @@ inline void calculate_sine() {
 
         // Compute j = round(v / PI).
         // First, j = v * (1 / PI) + 1.5*2^23 shifts the mantissa bits to give round-to-nearest-even.
-        sfpi::vFloat j __builtin_rvtt_sfpmad(v.get(), inv_pi, rounding_bias.get(), SFPMAD_MOD1_OFFSET_NONE);
+        sfpi::vFloat j = __builtin_rvtt_sfpmad(v.get(), inv_pi, rounding_bias.get(), SFPMAD_MOD1_OFFSET_NONE);
 
         // At this point, the mantissa bits of j contain the integer.
         // Store for later; the LSB determines the sign of the result.
