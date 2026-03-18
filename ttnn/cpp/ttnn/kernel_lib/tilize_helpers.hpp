@@ -40,6 +40,13 @@ enum class InitUninitMode : uint8_t {
 };
 
 // Input synchronization strategy.
+//
+// WARNING - NoWait:
+// This mode can cause data hazards if used incorrectly. ONLY use when:
+//   1. Paired with explicit cb_wait_front() before the operation, OR
+//   2. As the FIRST operation in a chain, OR
+//   3. With sharded tensors where data is pre-loaded in CB
+// When in doubt, use WaitBlock or WaitUpfront.
 enum class WaitMode : uint8_t {
     WaitBlock,    // Default — wait for input per block
     WaitUpfront,  // Wait for all input upfront before processing
