@@ -26,6 +26,9 @@ enum class ReconfigureRegisterDatatypeMode : uint8_t {
 };
 
 // Controls whether tilize_init/tilize_uninit are called.
+// Tilize must be initialized before use — only tilize helper calls perform this
+// initialization (via InitAndUninit or InitOnly modes, or by a prior tilize
+// call that already initialized — see Example 6).
 // When calling tilize() multiple times back-to-back, you can skip redundant
 // init/uninit between calls: use InitOnly on the first call, Neither on
 // middle calls, and UninitOnly on the last call.
