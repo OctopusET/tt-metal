@@ -78,8 +78,6 @@ sfpi_inline void calculate_div_int32_body(
     sfpi::vInt correction = sfpi::float_to_uint16(correction_f, 0);
 
     // Compute tmp = correction * b.
-    sfpi::vInt tmp_hi;
-    sfpi::vInt tmp_lo;
     b1 = __builtin_rvtt_sfpmul24(correction.get(), b1.get(), 0);
     sfpi::vInt tmp_hi = __builtin_rvtt_sfpmul24(correction.get(), b.get(), 1);
     sfpi::vInt tmp_lo = __builtin_rvtt_sfpmul24(correction.get(), b.get(), 0);
