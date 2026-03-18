@@ -107,6 +107,12 @@ def create_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help="Force all MoE stages to use this layer id (e.g. 3); default: use stage-dependent layer ids",
     )
+    parser.add_argument(
+        "--pipeline-manager-bin",
+        type=Path,
+        default=None,
+        help="Path to the deepseek_v3_b1_pipeline_manager binary. Defaults to auto-discovery.",
+    )
     return parser
 
 
@@ -125,6 +131,7 @@ def run_demo(
     lm_head_persistent_mode: bool = True,
     dense_layer_id_override: int | None = None,
     moe_layer_id_override: int | None = None,
+    pipeline_manager_bin: Path | None = None,
 ) -> None:
     """Run the pod pipeline. Requires 4, 16, or 64 distributed processes."""
     iterations = max_new_tokens
@@ -151,9 +158,17 @@ def run_demo(
                 prompt_ids = [tokenizer.bos_token_id if tokenizer.bos_token_id is not None else 0]
 
             logger.info("Running inference on prompt with {} tokens", len(prompt_ids))
-            generated_tokens = model_pipeline.run_inference(
+            streamed_tokens: list[int] = []
+
+            def on_token(token_id: int) -> None:
+                streamed_tokens.append(token_id)
+                logger.info("Streamed token {}: {}", len(streamed_tokens), token_id)
+
+            generated_tokens = model_pipeline.run_inference_with_manager(
                 prompt_token_ids=prompt_ids,
                 max_new_tokens=iterations,
+                manager_binary=pipeline_manager_bin,
+                on_token=on_token,
                 eos_token_id=tokenizer.eos_token_id,
                 return_generated_tokens=True,
             )
@@ -180,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         lm_head_persistent_mode=args.persistent_mode,
         dense_layer_id_override=args.dense_layer_id_override,
         moe_layer_id_override=args.moe_layer_id_override,
+        pipeline_manager_bin=args.pipeline_manager_bin,
     )
     print(file=sys.stdout, flush=True)
     return 0

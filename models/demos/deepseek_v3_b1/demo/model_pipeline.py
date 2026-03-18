@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -13,11 +14,13 @@ from loguru import logger
 import ttnn
 from models.common.utility_functions import is_slow_dispatch
 from models.demos.deepseek_v3_b1.demo.pipeline import create_pipeline_configuration_from_num_procs
+from models.demos.deepseek_v3_b1.demo.pipeline_manager_client import PipelineManagerClient, PipelineManagerRequest
 from models.demos.deepseek_v3_b1.demo.weight_provider import (
     CacheWeightProvider,
     SyntheticWeightProvider,
     WeightProvider,
 )
+from models.demos.deepseek_v3_b1.micro_ops.pipeline_block.op import HostSocketDescriptorBundle
 from models.demos.deepseek_v3_b1.model import TOKEN_ID_BYTES, DeepSeekV3, page_size_bytes, to_padded_input
 
 
@@ -77,6 +80,12 @@ class ModelPipeline:
                 batch_size=1,
             )
         logger.info(f"Created ModelPipeline for mesh id {self.pipeline.my_mesh_id}.")
+
+    def export_host_socket_descriptors(self, session_id: str) -> HostSocketDescriptorBundle:
+        """Export stage-0 host sockets for a cross-process pipeline manager."""
+        if self.pipeline.my_mesh_id != 0:
+            raise RuntimeError("Host socket descriptors can only be exported from mesh id 0")
+        return self.pipeline.export_host_socket_descriptors(session_id)
 
     def prefill_forward(self, tokens: list[int]) -> int:
         """Prefill 1 user's prompt tokens and return the next token id."""
@@ -150,6 +159,38 @@ class ModelPipeline:
         logger.debug("Generation complete ({} tokens generated)", 1 + num_decode_steps)
         if return_generated_tokens:
             return generated_tokens
+
+    def run_inference_with_manager(
+        self,
+        prompt_token_ids: list[int],
+        max_new_tokens: int,
+        *,
+        manager_binary: str | Path | None = None,
+        on_token: Callable[[int], None] | None = None,
+        eos_token_id: int | None = None,
+        return_generated_tokens: bool = False,
+    ) -> list[int] | None:
+        """Run inference through the persistent C++ pipeline manager."""
+        if self.pipeline.my_mesh_id != 0:
+            raise RuntimeError("run_inference_with_manager() should only be called on mesh id 0")
+        if max_new_tokens < 1:
+            raise RuntimeError(f"max_new_tokens must be >= 1, got {max_new_tokens}")
+
+        session_id = uuid.uuid4().hex
+        request_id = f"request_{uuid.uuid4().hex}"
+        descriptors = self.export_host_socket_descriptors(session_id)
+        request = PipelineManagerRequest(
+            request_id=request_id,
+            prompt_token_ids=prompt_token_ids,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+        )
+        with PipelineManagerClient.launch(descriptors, manager_binary=manager_binary) as manager:
+            return manager.run_request(
+                request,
+                on_token=on_token,
+                return_generated_tokens=return_generated_tokens,
+            )
 
     def barrier(self) -> None:
         self.pipeline.barrier()

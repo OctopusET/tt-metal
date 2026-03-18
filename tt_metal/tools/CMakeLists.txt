@@ -1,5 +1,6 @@
 add_subdirectory(watcher_dump)
 add_subdirectory(lightmetal_runner)
+add_subdirectory(deepseek_v3_b1_pipeline_manager)
 add_subdirectory(mem_bench)
 add_subdirectory(precompile_fw)
 

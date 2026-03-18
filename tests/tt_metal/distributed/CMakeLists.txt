@@ -103,4 +103,34 @@ set_target_properties(
             ${PROJECT_BINARY_DIR}/test/tt_metal/distributed
 )
 
+add_executable(deepseek_pipeline_manager_test)
+target_sources(deepseek_pipeline_manager_test PRIVATE test_deepseek_pipeline_manager.cpp)
+
+target_link_libraries(
+    deepseek_pipeline_manager_test
+    PRIVATE
+        tt_metal
+        test_common_libs
+)
+
+target_include_directories(
+    deepseek_pipeline_manager_test
+    PRIVATE
+        "$<TARGET_PROPERTY:Metalium::Metal,INCLUDE_DIRECTORIES>"
+        ${PROJECT_SOURCE_DIR}/tests
+)
+
+target_compile_definitions(
+    deepseek_pipeline_manager_test
+    PRIVATE
+        PIPELINE_MANAGER_BINARY_PATH="$<TARGET_FILE:deepseek_v3_b1_pipeline_manager>"
+)
+
+set_target_properties(
+    deepseek_pipeline_manager_test
+    PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY
+            ${PROJECT_BINARY_DIR}/test/tt_metal/distributed
+)
+
 add_subdirectory(multiprocess)

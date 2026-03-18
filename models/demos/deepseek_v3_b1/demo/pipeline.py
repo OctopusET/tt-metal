@@ -23,7 +23,7 @@ from models.demos.deepseek_v3_b1.demo.stage import (
     StageKind,
 )
 from models.demos.deepseek_v3_b1.demo.weight_provider import WeightProvider
-from models.demos.deepseek_v3_b1.micro_ops.pipeline_block.op import PipelineBlock
+from models.demos.deepseek_v3_b1.micro_ops.pipeline_block.op import HostSocketDescriptorBundle, PipelineBlock
 
 
 def create_fabric_router_config(max_payload_size: int) -> Any:
@@ -264,6 +264,11 @@ class Pipeline:
         if self._pipeline_block is None:
             raise RuntimeError("Pipeline.setup_and_run() or configure_block() must be called first")
         self._pipeline_block.read_output(output_tensor)
+
+    def export_host_socket_descriptors(self, session_id: str) -> HostSocketDescriptorBundle:
+        if self._pipeline_block is None:
+            raise RuntimeError("Pipeline.setup_and_run() or configure_block() must be called first")
+        return self._pipeline_block.export_host_socket_descriptors(session_id)
 
     def barrier(self) -> None:
         ttnn.distributed_context_barrier()

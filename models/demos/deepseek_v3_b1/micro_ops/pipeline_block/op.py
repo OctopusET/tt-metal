@@ -35,10 +35,22 @@ There are four distinct stage configurations:
      through a single shared socket pair.
 """
 
+from dataclasses import dataclass
+
 import ttnn
 from models.demos.deepseek_v3_b1.micro_ops.d2d_exchange.op import MeshWrapper, SocketInterface
 from models.demos.deepseek_v3_b1.micro_ops.host_io.op import HostInterface
 from models.demos.deepseek_v3_b1.micro_ops.host_io.utils import dtype_size
+
+
+@dataclass(frozen=True)
+class HostSocketDescriptorBundle:
+    session_id: str
+    h2d_socket_id: str
+    d2h_socket_id: str
+    h2d_descriptor_path: str
+    d2h_descriptor_path: str
+    page_size_bytes: int
 
 
 class PipelineBlock:
@@ -340,6 +352,25 @@ class PipelineBlock:
             self.d2h_socket is not None
         ), "read_output requires a D2H socket: valid on stage 0 with loopback, or last stage without loopback"
         self.d2h_socket.read_tensor(output_tensor)
+
+    def export_host_socket_descriptors(self, session_id: str) -> HostSocketDescriptorBundle:
+        assert self.is_first_pipeline_stage(), "Host socket descriptors can only be exported from the first stage"
+        assert self.h2d_socket is not None, "Expected H2D socket on the first pipeline stage"
+        assert self.d2h_socket is not None, "Expected D2H socket on the first pipeline stage"
+
+        h2d_socket_id = f"deepseek_v3_b1_{session_id}_rank{self.my_mesh_id}_h2d"
+        d2h_socket_id = f"deepseek_v3_b1_{session_id}_rank{self.my_mesh_id}_d2h"
+        h2d_descriptor_path = self.h2d_socket.export_descriptor(h2d_socket_id)
+        d2h_descriptor_path = self.d2h_socket.export_descriptor(d2h_socket_id)
+
+        return HostSocketDescriptorBundle(
+            session_id=session_id,
+            h2d_socket_id=h2d_socket_id,
+            d2h_socket_id=d2h_socket_id,
+            h2d_descriptor_path=h2d_descriptor_path,
+            d2h_descriptor_path=d2h_descriptor_path,
+            page_size_bytes=self.h2d_socket.get_page_size(),
+        )
 
     def get_upstream_socket(self):
         if hasattr(self, "exit_socket_interface"):
