@@ -778,48 +778,11 @@ class LMHeadStage(StageKind):
             persistent_next_iter_semaphore = ttnn.create_global_semaphore(mesh_device, worker_crs, 1)
             self._lmhead_state["persistent_next_iter_semaphore"] = persistent_next_iter_semaphore
 
-        # [BYPASS] Create bypass sender socket to a non-adjacent downstream stage.
-        if self._bypass_target_mesh_id is not None:
-            target_id = self._bypass_target_mesh_id
-            bypass_send_core = ttnn.MeshCoreCoord(pipeline_config[my_mesh_id].exit_node_coord, BYPASS_D2D_CORE)
-            bypass_recv_core = ttnn.MeshCoreCoord(pipeline_config[target_id].entry_node_coord, BYPASS_D2D_CORE)
-            bypass_upstream_core = ttnn.MeshCoreCoord(
-                pipeline_config[my_mesh_id].exit_node_coord, LMHeadStage.ARGMAX_FINAL_CORE
-            )
-            self._bypass_socket_interface = SocketInterface(
-                page_size=TOKEN_PAGE_SIZE_BYTES,
-                socket_fifo_size=TOKEN_FIFO_SIZE,
-                data_size_per_transfer=TOKEN_PAGE_SIZE_BYTES,
-                send_core_coord=bypass_send_core,
-                recv_core_coord=bypass_recv_core,
-                upstream_core_coord=bypass_upstream_core,
-                sender_mesh=MeshWrapper(mesh_device),
-                receiver_mesh=MeshWrapper(mesh_id=target_id),
-            )
-
-            bypass_staging_shape = (1, TOKEN_PAGE_SIZE_BYTES // 4)
-            bypass_staging_mem = ttnn.MemoryConfig(
-                ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-                ttnn.BufferType.L1,
-                ttnn.ShardSpec(argmax_final_core_grid, bypass_staging_shape, ttnn.ShardOrientation.ROW_MAJOR),
-            )
-            self._lmhead_state["bypass_staging_tensor"] = ttnn.from_torch(
-                torch.zeros((num_devices, *bypass_staging_shape), dtype=torch.uint32),
-                dtype=ttnn.uint32,
-                layout=ttnn.ROW_MAJOR_LAYOUT,
-                device=mesh_device,
-                memory_config=bypass_staging_mem,
-                mesh_mapper=mesh_mapper,
-            )
-            self._lmhead_state["bypass_socket_output"] = self._bypass_socket_interface.get_upstream_socket()
-
     def run_auxiliary_sockets(self) -> None:
-        if self._bypass_socket_interface is not None:
-            self._bypass_socket_interface.run()
+        pass
 
     def terminate_auxiliary(self) -> None:
-        if self._bypass_socket_interface is not None:
-            self._bypass_socket_interface.terminate(False)
+        pass
 
     def launch_compute(self, ctx: StageContext, pipeline_block: PipelineBlock) -> None:
         d = self._lmhead_state
@@ -859,6 +822,4 @@ class LMHeadStage(StageKind):
             persistent_next_iter_semaphore=d.get("persistent_next_iter_semaphore"),
             enable_mtp=self._enable_mtp,
             eh_subblock_k=d.get("eh_subblock_k"),
-            bypass_socket_output=d.get("bypass_socket_output"),
-            bypass_staging_tensor=d.get("bypass_staging_tensor"),
         )

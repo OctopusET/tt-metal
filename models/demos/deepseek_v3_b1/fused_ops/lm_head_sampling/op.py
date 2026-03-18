@@ -516,7 +516,8 @@ class LMHeadSampling:
         h_gamma_cb = 11  # [MTP] RMSNorm gamma weights for hidden states on sender core (tensor-backed)
         e_gamma_cb = 12  # [MTP] RMSNorm gamma weights for embeddings on sender core (tensor-backed)
         mcast_eh_src_cb = 15  # [MTP] Fused [h_norm|e_norm] on sender core, both RMSNorms write here directly
-        mtp_embedding_done_cb = 20  # [MTP] Signal CB: NCRISC pushes after embedding, TRISC waits before e_rmsnorm
+        embedding_done_cb = 20  # [MTP] Signal CB: NCRISC pushes after embedding, TRISC waits before e_rmsnorm
+        mcast_done_cb = 21  # [MTP] Signal from BRISC to NCRISC on sender core that mcast is done and its safe for NCRISC to use embedding_cb
         argmax_winner_cb = 3
         argmax_gather_cb = 4
         argmax_indices_cb = 5
@@ -542,6 +543,7 @@ class LMHeadSampling:
         mcast_eh_data_sender_semaphore_id = 5
         mcast_eh_data_receiver_semaphore_id = 6
         mtp_done_semaphore_id = 7
+        eh_matmul_done_semaphore_id = 8
 
         # Create mesh program descriptor
         mesh_program_descriptor = ttnn.MeshProgramDescriptor()
@@ -900,6 +902,18 @@ class LMHeadSampling:
                         mtp_bcast_start_distance_backward = 1 if mtp_bcast_num_targets_backward > 0 else 0
                         mtp_bcast_range_hops_backward = mtp_bcast_num_targets_backward
 
+                # [MTP] NOC coords of argmax final core (for eh_matmul_done semaphore target)
+                if enable_argmax:
+                    argmax_core_phys = device.worker_core_from_logical_core(argmax_final_core)
+                    argmax_core_noc_x = int(argmax_core_phys.x)
+                    argmax_core_noc_y = int(argmax_core_phys.y)
+                else:
+                    argmax_core_noc_x = 0
+                    argmax_core_noc_y = 0
+
+                # [MTP] Number of EH matmul cores (each incs eh_matmul_done semaphore once)
+                eh_matmul_num_cores = eh_matmul_core_grid.num_cores() if enable_mtp else 0
+
                 # ================================================================
                 # NCRISC compile-time args
                 # ================================================================
@@ -1015,8 +1029,13 @@ class LMHeadSampling:
                     # Sender core NOC for L1-to-L1 copy (embedding region in mcast_eh_src_cb -> embedding_cb)
                     ("sender_noc_x", int(core_noc_x) if enable_mtp else 0),
                     ("sender_noc_y", int(core_noc_y) if enable_mtp else 0),
-                    ("mtp_embedding_done_cb", mtp_embedding_done_cb if enable_mtp else 0),
+                    ("embedding_done_cb", embedding_done_cb if enable_mtp else 0),
+                    ("mcast_done_cb", mcast_done_cb if enable_mtp else 0),
                     ("mtp_done_semaphore_id", mtp_done_semaphore_id if enable_mtp else 0),
+                    ("eh_matmul_done_semaphore_id", eh_matmul_done_semaphore_id if enable_mtp else 0),
+                    ("argmax_defer_socket_output", 1 if enable_socket_output else 0),
+                    ("argmax_core_noc_x", argmax_core_noc_x if enable_mtp else 0),
+                    ("argmax_core_noc_y", argmax_core_noc_y if enable_mtp else 0),
                 ]
 
                 # ================================================================
@@ -1043,6 +1062,8 @@ class LMHeadSampling:
                     ("mcast_src_cb", mcast_src_cb),
                     ("mcast_src_num_pages", rms_num_tiles),
                     ("mcast_dst_cb", mcast_dst_cb),
+                    ("matmul_eh_out", matmul_out_eh_cb),
+                    ("matmul_eh_out_w", eh_out_w_per_core if enable_mtp else 0),
                     ("mcast_is_part_of_receiver_grid", is_part_of_receiver_grid),
                     ("argmax_winner_page_bytes", argmax_winner_page_bytes),
                     ("argmax_local_ready_semaphore_id", argmax_local_ready_semaphore_id),
@@ -1066,9 +1087,15 @@ class LMHeadSampling:
                     ("mcast_eh_data_receiver_semaphore", mcast_eh_data_receiver_semaphore_id if enable_mtp else 0),
                     ("mcast_eh_src_cb", mcast_eh_src_cb if enable_mtp else 0),
                     ("mcast_eh_dst_cb", mcast_eh_dst_cb if enable_mtp else 0),
+                    ("mcast_done_cb", mcast_done_cb if enable_mtp else 0),
                     ("mcast_eh_data_size_bytes", eh_mcast_data_size_bytes if enable_mtp else 0),
                     ("mcast_eh_src_num_pages", eh_concat_rms_tiles if enable_mtp else 0),
                     ("mtp_done_semaphore_id", mtp_done_semaphore_id if enable_mtp else 0),
+                    ("eh_matmul_done_semaphore_id", eh_matmul_done_semaphore_id if enable_mtp else 0),
+                    ("argmax_defer_socket_output", 1 if enable_socket_output else 0),
+                    ("argmax_core_noc_x", argmax_core_noc_x if enable_mtp else 0),
+                    ("argmax_core_noc_y", argmax_core_noc_y if enable_mtp else 0),
+                    ("eh_matmul_num_cores", eh_matmul_num_cores if enable_mtp else 0),
                 ]
 
                 # ================================================================
@@ -1123,8 +1150,12 @@ class LMHeadSampling:
                         if (enable_mtp and eh_proj_working_buf_tensor is not None)
                         else 0,
                     ),
-                    ("mtp_embedding_done_cb", mtp_embedding_done_cb if enable_mtp else 0),
+                    ("embedding_done_cb", embedding_done_cb if enable_mtp else 0),
+                    ("mcast_done_cb", mcast_done_cb if enable_mtp else 0),
                     ("mtp_done_semaphore_id", mtp_done_semaphore_id if enable_mtp else 0),
+                    ("eh_matmul_done_semaphore_id", eh_matmul_done_semaphore_id if enable_mtp else 0),
+                    ("argmax_core_noc_x", argmax_core_noc_x if enable_mtp else 0),
+                    ("argmax_core_noc_y", argmax_core_noc_y if enable_mtp else 0),
                 ]
 
                 # ================================================================
@@ -1453,7 +1484,7 @@ class LMHeadSampling:
                     )
 
                     emb_done_cb_format = ttnn.CBFormatDescriptor(
-                        buffer_index=mtp_embedding_done_cb,
+                        buffer_index=embedding_done_cb,
                         data_format=data_format,
                         page_size=16,
                     )
@@ -1461,6 +1492,17 @@ class LMHeadSampling:
                         total_size=16,
                         core_ranges=mcast_sender_core_grid,
                         format_descriptors=[emb_done_cb_format],
+                    )
+
+                    mcast_done_cb_format = ttnn.CBFormatDescriptor(
+                        buffer_index=mcast_done_cb,
+                        data_format=data_format,
+                        page_size=16,
+                    )
+                    mcast_done_cb_descriptor = ttnn.CBDescriptor(
+                        total_size=16,
+                        core_ranges=mcast_sender_core_grid,
+                        format_descriptors=[mcast_done_cb_format],
                     )
 
                     mtp_cb_descriptors = [
@@ -1471,6 +1513,7 @@ class LMHeadSampling:
                         matmul_eh_cb_descriptor,
                         matmul_out_eh_cb_descriptor,
                         emb_done_cb_descriptor,
+                        mcast_done_cb_descriptor,
                     ]
 
                 # CB list
@@ -1583,6 +1626,11 @@ class LMHeadSampling:
                             ),
                             ttnn.SemaphoreDescriptor(
                                 id=mtp_done_semaphore_id,
+                                core_ranges=all_cores,
+                                initial_value=0,
+                            ),
+                            ttnn.SemaphoreDescriptor(
+                                id=eh_matmul_done_semaphore_id,
                                 core_ranges=all_cores,
                                 initial_value=0,
                             ),

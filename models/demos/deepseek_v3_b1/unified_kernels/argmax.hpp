@@ -48,7 +48,8 @@ struct Sampling {
         uint32_t SocketPageSizeBytes = 0,
         uint32_t ScoresCBId = 0xFFFFFFFF,
         uint32_t ScoresNumPages = 0,
-        uint32_t GatherCBId = 0xFFFFFFFF>
+        uint32_t GatherCBId = 0xFFFFFFFF,
+        uint32_t DeferSocketOutput = 0>
     struct ReaderCTArgs {
         static constexpr uint32_t num_values = NumValues;
         static constexpr uint32_t winner_page_bytes = WinnerPageBytes;
@@ -77,6 +78,7 @@ struct Sampling {
         static constexpr uint32_t scores_cb_id = ScoresCBId;
         static constexpr uint32_t scores_num_pages = ScoresNumPages;
         static constexpr uint32_t gather_cb_id = GatherCBId;
+        static constexpr bool defer_socket_output = DeferSocketOutput == 1;
     };
 
     template <
@@ -84,13 +86,15 @@ struct Sampling {
         uint32_t LocalReadySemaphoreId,
         uint32_t SocketMode = 0,
         uint32_t SocketCBId = 0,
-        uint32_t SocketPageSizeBytes = 0>
+        uint32_t SocketPageSizeBytes = 0,
+        uint32_t DeferSocketOutput = 0>
     struct WriterCTArgs {
         static constexpr uint32_t winner_page_bytes = WinnerPageBytes;
         static constexpr uint32_t local_ready_semaphore_id = LocalReadySemaphoreId;
         static constexpr uint32_t socket_mode = SocketMode;
         static constexpr uint32_t socket_cb_id = SocketCBId;
         static constexpr uint32_t socket_page_size_bytes = SocketPageSizeBytes;
+        static constexpr bool defer_socket_output = DeferSocketOutput == 1;
     };
 
     struct ComputeCTArgs {};
@@ -138,8 +142,34 @@ struct Sampling {
     template <typename CTArgs, bool IsActiveCore, bool IsFinalCore, bool IsMeshSenderCore>
     class Op {
     public:
+        size_t persistent_fabric_arg_idx = 0;
         void operator()(const RTArgs& args) { impl(args); }
+#if defined(COMPILE_FOR_NCRISC) || defined(COMPILE_FOR_BRISC)
+        FORCE_INLINE void send_persistent_next_iter_inc_via_fabric_brisc(const WriterArgs& args, size_t& arg_idx) {
+            if (args.persistent_enable == 0) {
+                return;
+            }
+            constexpr uint32_t packet_header_size_bytes = sizeof(PACKET_HEADER_TYPE);
+            auto route_id = PacketHeaderPool::allocate_header_n(1);
+            volatile tt_l1_ptr PACKET_HEADER_TYPE* packet_header = PacketHeaderPool::header_table[route_id].first;
+            set_unicast_route(
+                packet_header,
+                static_cast<uint16_t>(args.persistent_dst_chip_id),
+                static_cast<uint16_t>(args.persistent_dst_mesh_id),
+                1);
+            packet_header->to_noc_unicast_atomic_inc(tt::tt_fabric::NocUnicastAtomicIncCommandHeader{
+                get_noc_addr(args.persistent_dst_noc_x, args.persistent_dst_noc_y, args.persistent_dst_sem_addr), 1});
 
+            auto fabric_sender =
+                tt::tt_fabric::WorkerToFabricEdmSender::build_from_args<ProgrammableCoreType::TENSIX>(arg_idx);
+            fabric_sender.open();
+            fabric_sender.wait_for_empty_write_slot();
+            fabric_sender.send_payload_flush_blocking_from_address(
+                reinterpret_cast<uint32_t>(packet_header), packet_header_size_bytes);
+            fabric_sender.close();
+            noc_async_full_barrier();
+        }
+#endif
     private:
 #if defined(COMPILE_FOR_NCRISC)
         FORCE_INLINE bool is_better_candidate(
@@ -283,31 +313,6 @@ struct Sampling {
             fabric_sender.wait_for_empty_write_slot();
             fabric_sender.send_payload_without_header_non_blocking_from_address(
                 local_slot_addr, CTArgs::winner_page_bytes);
-            fabric_sender.send_payload_flush_blocking_from_address(
-                reinterpret_cast<uint32_t>(packet_header), packet_header_size_bytes);
-            fabric_sender.close();
-            noc_async_full_barrier();
-        }
-
-        FORCE_INLINE void send_persistent_next_iter_inc_via_fabric_brisc(const WriterArgs& args, size_t& arg_idx) {
-            if (args.persistent_enable == 0) {
-                return;
-            }
-            constexpr uint32_t packet_header_size_bytes = sizeof(PACKET_HEADER_TYPE);
-            auto route_id = PacketHeaderPool::allocate_header_n(1);
-            volatile tt_l1_ptr PACKET_HEADER_TYPE* packet_header = PacketHeaderPool::header_table[route_id].first;
-            set_unicast_route(
-                packet_header,
-                static_cast<uint16_t>(args.persistent_dst_chip_id),
-                static_cast<uint16_t>(args.persistent_dst_mesh_id),
-                1);
-            packet_header->to_noc_unicast_atomic_inc(tt::tt_fabric::NocUnicastAtomicIncCommandHeader{
-                get_noc_addr(args.persistent_dst_noc_x, args.persistent_dst_noc_y, args.persistent_dst_sem_addr), 1});
-
-            auto fabric_sender =
-                tt::tt_fabric::WorkerToFabricEdmSender::build_from_args<ProgrammableCoreType::TENSIX>(arg_idx);
-            fabric_sender.open();
-            fabric_sender.wait_for_empty_write_slot();
             fabric_sender.send_payload_flush_blocking_from_address(
                 reinterpret_cast<uint32_t>(packet_header), packet_header_size_bytes);
             fabric_sender.close();
@@ -548,9 +553,10 @@ struct Sampling {
                 DPRINT << "ARGMAX_B MESH_SENT" << ENDL();
             }
             if constexpr (IsFinalCore) {
-                DPRINT << "ARGMAX_B PERSISTENT" << ENDL();
-                send_persistent_next_iter_inc_via_fabric_brisc(args, arg_idx);
-                DPRINT << "ARGMAX_B DONE" << ENDL();
+                persistent_fabric_arg_idx = arg_idx;
+                if constexpr (!CTArgs::defer_socket_output) {
+                    send_persistent_next_iter_inc_via_fabric_brisc(args, arg_idx);
+                }
             }
 #elif defined(COMPILE_FOR_TRISC)
             // No-op for k=1 argmax fast path.
