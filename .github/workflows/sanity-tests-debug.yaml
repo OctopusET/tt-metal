@@ -1,6 +1,6 @@
 name: "Sanity tests nightly debug run"
 
-run-name: "Sanity tests nightly debug run${{ github.event.schedule == '0 1 * * *' && ' with watcher' || (inputs.enable-watcher && ' with watcher' || '') }}${{ github.event.schedule == '0 2 * * *' && ' with LLK asserts' || (inputs.enable-llk-asserts && ' with LLK asserts' || '') }}"
+run-name: "Sanity tests nightly debug run${{ github.event.schedule == '0 1 * * *' && ' with watcher' || (inputs.enable-watcher && ' with watcher' || '') }}${{ github.event.schedule == '0 2 * * *' && ' with Wormhole LLK asserts' || (inputs.enable-llk-asserts && ' with Wormhole LLK asserts' || '') }}"
 
 on:
   schedule:
