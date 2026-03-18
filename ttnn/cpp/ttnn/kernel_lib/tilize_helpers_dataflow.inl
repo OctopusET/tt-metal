@@ -65,8 +65,14 @@ FORCE_INLINE void read_sticks_for_tilize(const Accessor& accessor, uint32_t tota
     constexpr uint32_t elem_size = tile_size / tile_hw;
     constexpr uint32_t tile_row_bytes = tile_w * elem_size;
 
-    // elem_size derivation only valid for standard (non block-float) formats
+    // Block-float formats (BFP8, BFP4, etc.) have tile overhead that breaks
+    // the elem_size = tile_size / tile_hw derivation. These formats are never
+    // used with row-major data, so this helper should not be called for them.
     ASSERT(tile_size % tile_hw == 0);
+
+    // Basic sanity
+    ASSERT(total_num_rows > 0);
+    ASSERT(row_bytes > 0);
 
     // Pad row width up to tile boundary
     uint32_t padded_row_bytes = detail::round_up(row_bytes, tile_row_bytes);
@@ -78,6 +84,10 @@ FORCE_INLINE void read_sticks_for_tilize(const Accessor& accessor, uint32_t tota
         // Each block: reserve width_in_tiles pages, read tile_h rows, push.
         // CB page_size = tile_size.
         // Pairs with compute_kernel_lib::tilize(num_blocks) [symmetric].
+
+        // Deadlock prevention: compute waits for width_in_tiles pages per block.
+        // If CB capacity < width_in_tiles, cb_reserve_back blocks forever because
+        // compute never pops (it hasn't received a full block yet).
         uint32_t cb_capacity = get_local_cb_interface(cb_id).fifo_num_pages;
         if (cb_capacity > 0) {
             ASSERT(width_in_tiles <= cb_capacity);
@@ -111,6 +121,16 @@ FORCE_INLINE void read_sticks_for_tilize(const Accessor& accessor, uint32_t tota
         // L1 advantage: CB only needs min(tile_h, total_num_rows) pages buffered,
         // which saves space when total_num_rows < tile_h (e.g. 7 rows needs
         // 7 * padded_row_bytes instead of width_in_tiles * tile_size).
+
+        // Deadlock prevention: asymmetric tilize waits for min(tile_h, total_num_rows)
+        // row-pages in the first block. If CB can't hold that many pages, the reader
+        // blocks on cb_reserve_back while compute is stuck waiting for more rows.
+        uint32_t rows_first_block = (total_num_rows < tile_h) ? total_num_rows : tile_h;
+        uint32_t cb_capacity = get_local_cb_interface(cb_id).fifo_num_pages;
+        if (cb_capacity > 0) {
+            ASSERT(rows_first_block <= cb_capacity);
+        }
+
         for (uint32_t row = 0; row < total_num_rows; row++) {
             cb_reserve_back(cb_id, 1);
             uint32_t l1_addr = get_write_ptr(cb_id);
@@ -149,7 +169,12 @@ FORCE_INLINE void write_sticks_after_untilize(const Accessor& accessor, uint32_t
     constexpr uint32_t elem_size = tile_size / tile_hw;
     constexpr uint32_t tile_row_bytes = tile_w * elem_size;
 
+    // Block-float format guard (same as read helper)
     ASSERT(tile_size % tile_hw == 0);
+
+    // Basic sanity
+    ASSERT(total_num_rows > 0);
+    ASSERT(row_bytes > 0);
 
     // Pad row width up to tile boundary
     uint32_t padded_row_bytes = detail::round_up(row_bytes, tile_row_bytes);
@@ -158,6 +183,14 @@ FORCE_INLINE void write_sticks_after_untilize(const Accessor& accessor, uint32_t
 
     // Always TILE granularity — compute_kernel_lib::untilize produces tile-sized pages.
     // Pairs with compute_kernel_lib::untilize<width_tiles, cb_in, cb_out>(num_blocks).
+
+    // Deadlock prevention: writer waits for width_in_tiles pages from compute.
+    // If CB capacity < width_in_tiles, cb_wait_front blocks forever.
+    uint32_t cb_capacity = get_local_cb_interface(cb_id).fifo_num_pages;
+    if (cb_capacity > 0) {
+        ASSERT(width_in_tiles <= cb_capacity);
+    }
+
     for (uint32_t block = 0; block < total_blocks; block++) {
         uint32_t start_row = block * tile_h;
         uint32_t rows_this_block = total_num_rows - start_row;
