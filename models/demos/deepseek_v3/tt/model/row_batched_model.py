@@ -19,7 +19,7 @@ from models.demos.deepseek_v3.tt.lm_head1d import LMHead1D
 from models.demos.deepseek_v3.tt.rms_norm.distributed_rms_norm import DistributedRMSNorm
 from models.demos.deepseek_v3.utils.abstract_module import AbstractModule
 from models.demos.deepseek_v3.utils.config_dataclass import KvCacheConfig, ReshardConfig
-from models.demos.deepseek_v3.utils.config_helpers import sub_state_dict
+from models.demos.deepseek_v3.utils.config_helpers import get_fabric_config, sub_state_dict
 from models.demos.deepseek_v3.utils.run_config import (
     MESH_DEVICE_STATE_DICT_KEY,
     ModelDecodeConfig,
