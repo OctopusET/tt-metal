@@ -44,7 +44,8 @@ permissions:
   checks: write
 
 jobs:
-  determine-watcher:
+  determine-debug-flags:
+    name: Determine debug flags
     runs-on: ubuntu-latest
     outputs:
       enable-watcher: ${{ steps.check.outputs.enable-watcher }}
@@ -66,7 +67,7 @@ jobs:
   # Shared build jobs - one per platform to enable artifact forwarding
   build-artifacts-ubuntu-22:
     name: Build artifacts (Ubuntu 22.04)
-    needs: determine-watcher
+    needs: determine-debug-flags
     if: ${{ github.event_name == 'schedule' || inputs.run-wormhole-tests || inputs.run-blackhole-tests }}
     uses: ./.github/workflows/build-artifact.yaml
     permissions:
@@ -83,7 +84,7 @@ jobs:
 
   build-artifacts-ubuntu-24:
     name: Build artifacts (Ubuntu 24.04)
-    needs: determine-watcher
+    needs: determine-debug-flags
     if: ${{ github.event_name == 'schedule' || inputs.run-wormhole-tests || inputs.run-blackhole-tests }}
     uses: ./.github/workflows/build-artifact.yaml
     permissions:
