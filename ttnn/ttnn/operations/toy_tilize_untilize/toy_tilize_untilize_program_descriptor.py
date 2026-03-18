@@ -93,6 +93,7 @@ def create_program_descriptor(
     )
 
     # --- Compute kernel ---
+    fp32_dest = input_tensor.dtype == ttnn.float32
     compute_ct_args = [width_tiles, num_blocks]
 
     compute_kernel = ttnn.KernelDescriptor(
@@ -100,7 +101,7 @@ def create_program_descriptor(
         core_ranges=core_grid,
         compile_time_args=compute_ct_args,
         runtime_args=[],
-        config=ttnn.ComputeConfigDescriptor(),
+        config=ttnn.ComputeConfigDescriptor(fp32_dest_acc_en=fp32_dest),
     )
 
     return ttnn.ProgramDescriptor(

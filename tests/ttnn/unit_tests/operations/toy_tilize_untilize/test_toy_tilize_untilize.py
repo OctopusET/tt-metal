@@ -57,6 +57,6 @@ def test_toy_tilize_untilize(device, shape, dtype):
             torch_output, torch_input
         ), f"bf16 mismatch. Max diff: {(torch_output - torch_input).abs().max()}"
     else:
-        # fp32 tilize+untilize goes through DEST registers — may lose precision
+        # fp32 tilize+untilize with fp32 dest accumulation — should be near-lossless
         correlation = pcc(torch_output, torch_input)
         assert correlation > 0.999, f"fp32 PCC too low: {correlation:.6f}"
