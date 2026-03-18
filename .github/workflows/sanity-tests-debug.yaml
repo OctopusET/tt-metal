@@ -120,8 +120,8 @@ jobs:
       wheel-artifact-name: ${{ needs.build-artifacts-ubuntu-22.outputs.wheel-artifact-name }}
 
   blackhole-nightly-debug-ubuntu-22:
-    name: blackhole nightly debug run (Ubuntu 22.04${{ needs.determine-watcher.outputs.enable-watcher == 'true' && ' with watcher' || '' }}${{ needs.determine-watcher.outputs.enable-llk-asserts == 'true' && ' with LLK asserts' || '' }})
-    needs: [determine-watcher, build-artifacts-ubuntu-22]
+    name: blackhole nightly debug run (Ubuntu 22.04${{ needs.determine-debug-flags.outputs.enable-watcher == 'true' && ' with watcher' || '' }}${{ needs.determine-debug-flags.outputs.enable-llk-asserts == 'true' && ' with LLK asserts' || '' }})
+    needs: [determine-debug-flags, build-artifacts-ubuntu-22]
     if: ${{ always() && !cancelled() && (github.event_name == 'schedule' || inputs.run-blackhole-tests) }}
     uses: ./.github/workflows/blackhole-post-commit.yaml
     secrets: inherit
@@ -129,17 +129,17 @@ jobs:
       build-type: RelWithDebInfo
       platform: "Ubuntu 22.04"
       enable-lto: ${{ inputs.enable-lto || false }}
-      enable-watcher: ${{ needs.determine-watcher.outputs.enable-watcher == 'true' }}
-      enable-llk-asserts: ${{ needs.determine-watcher.outputs.enable-llk-asserts == 'true' }}
-      run-profiler-regression: ${{ needs.determine-watcher.outputs.enable-watcher != 'true' }}
+      enable-watcher: ${{ needs.determine-debug-flags.outputs.enable-watcher == 'true' }}
+      enable-llk-asserts: ${{ needs.determine-debug-flags.outputs.enable-llk-asserts == 'true' }}
+      run-profiler-regression: ${{ needs.determine-debug-flags.outputs.enable-watcher != 'true' }}
       dev-docker-image: ${{ needs.build-artifacts-ubuntu-22.outputs.dev-docker-image }}
       build-artifact-name: ${{ needs.build-artifacts-ubuntu-22.outputs.build-artifact-name }}
       wheel-artifact-name: ${{ needs.build-artifacts-ubuntu-22.outputs.wheel-artifact-name }}
 
   # Ubuntu 24.04 test jobs - both Sanity and Blackhole share artifacts
   wormhole-nightly-debug-ubuntu-24:
-    name: Sanity tests nightly debug run (Ubuntu 24.04${{ needs.determine-watcher.outputs.enable-watcher == 'true' && ' with watcher' || '' }}${{ needs.determine-watcher.outputs.enable-llk-asserts == 'true' && ' with LLK asserts' || '' }})
-    needs: [determine-watcher, build-artifacts-ubuntu-24]
+    name: Sanity tests nightly debug run (Ubuntu 24.04${{ needs.determine-debug-flags.outputs.enable-watcher == 'true' && ' with watcher' || '' }}${{ needs.determine-debug-flags.outputs.enable-llk-asserts == 'true' && ' with LLK asserts' || '' }})
+    needs: [determine-debug-flags, build-artifacts-ubuntu-24]
     if: ${{ always() && !cancelled() && (github.event_name == 'schedule' || inputs.run-wormhole-tests) }}
     uses: ./.github/workflows/sanity-tests.yaml
     secrets: inherit
@@ -147,11 +147,11 @@ jobs:
       build-type: RelWithDebInfo
       platform: "Ubuntu 24.04"
       enable-lto: ${{ inputs.enable-lto || false }}
-      enable-watcher: ${{ needs.determine-watcher.outputs.enable-watcher == 'true' }}
-      enable-llk-asserts: ${{ needs.determine-watcher.outputs.enable-llk-asserts == 'true' }}
-      run-profiler-regression: ${{ needs.determine-watcher.outputs.enable-watcher != 'true' }}
-      run-ops-unit-tests: ${{ needs.determine-watcher.outputs.enable-watcher != 'true' }}
-      run-t3000-apc-fast-tests: ${{ needs.determine-watcher.outputs.enable-watcher != 'true' }}
+      enable-watcher: ${{ needs.determine-debug-flags.outputs.enable-watcher == 'true' }}
+      enable-llk-asserts: ${{ needs.determine-debug-flags.outputs.enable-llk-asserts == 'true' }}
+      run-profiler-regression: ${{ needs.determine-debug-flags.outputs.enable-watcher != 'true' }}
+      run-ops-unit-tests: ${{ needs.determine-debug-flags.outputs.enable-watcher != 'true' }}
+      run-t3000-apc-fast-tests: ${{ needs.determine-debug-flags.outputs.enable-watcher != 'true' }}
       dev-docker-image: ${{ needs.build-artifacts-ubuntu-24.outputs.dev-docker-image }}
       build-artifact-name: ${{ needs.build-artifacts-ubuntu-24.outputs.build-artifact-name }}
       wheel-artifact-name: ${{ needs.build-artifacts-ubuntu-24.outputs.wheel-artifact-name }}
