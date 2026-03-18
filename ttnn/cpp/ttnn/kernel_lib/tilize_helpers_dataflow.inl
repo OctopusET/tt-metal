@@ -10,6 +10,10 @@
  * This file contains the implementation details for read_sticks_for_tilize()
  * and write_sticks_after_untilize(). It should only be included by
  * tilize_helpers_dataflow.hpp.
+ *
+ * These helpers pair with the compute-side helpers in:
+ *   - tilize_helpers.hpp  (compute_kernel_lib::tilize)
+ *   - untilize_helpers.hpp (compute_kernel_lib::untilize)
  */
 
 namespace dataflow_kernel_lib {
@@ -26,6 +30,31 @@ constexpr uint32_t div_up(uint32_t a, uint32_t b) {
 
 }  // namespace detail
 
+// ─── read_sticks_for_tilize ─────────────────────────────────────────────────
+//
+// TILE granularity example (reader kernel):
+//
+//   #include "ttnn/cpp/ttnn/kernel_lib/tilize_helpers_dataflow.hpp"
+//   void kernel_main() {
+//       constexpr auto src_args = TensorAccessorArgs<0>();
+//       const auto accessor = TensorAccessor(src_args, get_arg_val<uint32_t>(0));
+//       dataflow_kernel_lib::read_sticks_for_tilize<cb_in>(
+//           accessor, total_num_rows, row_bytes);
+//   }
+//   // Compute side (symmetric tilize — tilize_helpers.hpp):
+//   //   compute_kernel_lib::tilize<width_tiles, cb_in, cb_out>(num_blocks);
+//   // CB config: page_size = tile_size
+//
+// ROW granularity example (reader kernel):
+//
+//   dataflow_kernel_lib::read_sticks_for_tilize<cb_in, TilizeGranularity::ROW>(
+//       accessor, total_num_rows, row_bytes);
+//   // Compute side (asymmetric tilize — tilize_helpers.hpp):
+//   //   compute_kernel_lib::tilize<width_tiles, cb_in, cb_out>(num_blocks, total_num_rows);
+//   // CB config: page_size = padded_row_bytes
+//   // L1 benefit: when total_num_rows < 32, CB only needs total_num_rows pages
+//   //   instead of width_in_tiles tile-pages (which always span 32 rows).
+//
 template <uint32_t cb_id, TilizeGranularity granularity, typename Accessor>
 FORCE_INLINE void read_sticks_for_tilize(const Accessor& accessor, uint32_t total_num_rows, uint32_t row_bytes) {
     // Derive tile geometry from CB configuration (all constexpr)
@@ -45,8 +74,10 @@ FORCE_INLINE void read_sticks_for_tilize(const Accessor& accessor, uint32_t tota
     uint32_t total_blocks = detail::div_up(total_num_rows, tile_h);
 
     if constexpr (granularity == TilizeGranularity::TILE) {
-        // TILE mode: push width_in_tiles pages per block
-        // CB page_size must be tile_size
+        // ── TILE mode ───────────────────────────────────────────────────
+        // Each block: reserve width_in_tiles pages, read tile_h rows, push.
+        // CB page_size = tile_size.
+        // Pairs with compute_kernel_lib::tilize(num_blocks) [symmetric].
         uint32_t cb_capacity = get_local_cb_interface(cb_id).fifo_num_pages;
         if (cb_capacity > 0) {
             ASSERT(width_in_tiles <= cb_capacity);
@@ -72,8 +103,14 @@ FORCE_INLINE void read_sticks_for_tilize(const Accessor& accessor, uint32_t tota
             cb_push_back(cb_id, width_in_tiles);
         }
     } else {
-        // ROW mode: push 1 page per row
-        // CB page_size must be padded_row_bytes
+        // ── ROW mode ────────────────────────────────────────────────────
+        // Each row: reserve 1 page, read 1 row, push.
+        // CB page_size = padded_row_bytes.
+        // Pairs with compute_kernel_lib::tilize(num_blocks, total_num_rows) [asymmetric].
+        // The asymmetric tilize waits for min(32, pages_left) row-pages per block.
+        // L1 advantage: CB only needs min(tile_h, total_num_rows) pages buffered,
+        // which saves space when total_num_rows < tile_h (e.g. 7 rows needs
+        // 7 * padded_row_bytes instead of width_in_tiles * tile_size).
         for (uint32_t row = 0; row < total_num_rows; row++) {
             cb_reserve_back(cb_id, 1);
             uint32_t l1_addr = get_write_ptr(cb_id);
@@ -87,6 +124,21 @@ FORCE_INLINE void read_sticks_for_tilize(const Accessor& accessor, uint32_t tota
     }
 }
 
+// ─── write_sticks_after_untilize ────────────────────────────────────────────
+//
+// Example (writer kernel):
+//
+//   #include "ttnn/cpp/ttnn/kernel_lib/tilize_helpers_dataflow.hpp"
+//   void kernel_main() {
+//       constexpr auto dst_args = TensorAccessorArgs<0>();
+//       const auto accessor = TensorAccessor(dst_args, get_arg_val<uint32_t>(0));
+//       dataflow_kernel_lib::write_sticks_after_untilize<cb_out>(
+//           accessor, total_num_rows, row_bytes);
+//   }
+//   // Compute side (untilize_helpers.hpp):
+//   //   compute_kernel_lib::untilize<width_tiles, cb_in, cb_out>(num_blocks);
+//   // CB config: page_size = tile_size (untilize always outputs tile-sized pages)
+//
 template <uint32_t cb_id, typename Accessor>
 FORCE_INLINE void write_sticks_after_untilize(const Accessor& accessor, uint32_t total_num_rows, uint32_t row_bytes) {
     // Derive tile geometry from CB configuration (all constexpr)
@@ -104,6 +156,8 @@ FORCE_INLINE void write_sticks_after_untilize(const Accessor& accessor, uint32_t
     uint32_t width_in_tiles = padded_row_bytes / tile_row_bytes;
     uint32_t total_blocks = detail::div_up(total_num_rows, tile_h);
 
+    // Always TILE granularity — compute_kernel_lib::untilize produces tile-sized pages.
+    // Pairs with compute_kernel_lib::untilize<width_tiles, cb_in, cb_out>(num_blocks).
     for (uint32_t block = 0; block < total_blocks; block++) {
         uint32_t start_row = block * tile_h;
         uint32_t rows_this_block = total_num_rows - start_row;
@@ -111,7 +165,6 @@ FORCE_INLINE void write_sticks_after_untilize(const Accessor& accessor, uint32_t
             rows_this_block = tile_h;
         }
 
-        // Wait for full tile pages from compute (untilize produces full tiles)
         cb_wait_front(cb_id, width_in_tiles);
         uint32_t l1_addr = get_read_ptr(cb_id);
 

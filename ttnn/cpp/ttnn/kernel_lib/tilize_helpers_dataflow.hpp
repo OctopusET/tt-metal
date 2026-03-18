@@ -10,12 +10,33 @@ namespace dataflow_kernel_lib {
 /**
  * @brief Controls CB page granularity for tilize dataflow
  *
- * TILE: CB page_size = tile_size. Reader pushes width_in_tiles pages per block.
- *       Compute tilize uses symmetric mode. Coarser, less synchronization.
+ * Determines how the reader pushes data into the input CB for the
+ * compute_kernel_lib::tilize helper (ttnn/cpp/ttnn/kernel_lib/tilize_helpers.hpp).
  *
- * ROW:  CB page_size = padded_row_bytes. Reader pushes 1 page per row.
- *       Compute tilize uses asymmetric mode (total_input_pages). Finer
- *       granularity — compute can start as soon as 32 rows arrive.
+ * TILE: CB page_size = tile_size. Reader pushes width_in_tiles pages per
+ *       tile-height block. Matches compute_kernel_lib::tilize symmetric mode:
+ *         compute_kernel_lib::tilize<width_tiles, cb_in, cb_out>(num_blocks);
+ *
+ * ROW:  CB page_size = padded_row_bytes (one stick = one page). Reader pushes
+ *       1 page per row. Matches compute_kernel_lib::tilize asymmetric mode:
+ *         compute_kernel_lib::tilize<width_tiles, cb_in, cb_out>(num_blocks, total_num_rows);
+ *       Finer granularity — compute can start as soon as 32 rows arrive.
+ *       When total_num_rows < 32, this also reduces L1 usage for the CB
+ *       since only total_num_rows row-pages need to be buffered instead
+ *       of width_in_tiles tile-pages (which always assume 32 rows of data).
+ *
+ * Example — TILE granularity (reader kernel):
+ *   dataflow_kernel_lib::read_sticks_for_tilize<cb_in>(accessor, num_rows, row_bytes);
+ *
+ * Example — ROW granularity (reader kernel):
+ *   dataflow_kernel_lib::read_sticks_for_tilize<cb_in, dataflow_kernel_lib::TilizeGranularity::ROW>(
+ *       accessor, num_rows, row_bytes);
+ *
+ * Corresponding compute kernel for TILE:
+ *   compute_kernel_lib::tilize<width_tiles, cb_in, cb_out>(num_blocks);
+ *
+ * Corresponding compute kernel for ROW:
+ *   compute_kernel_lib::tilize<width_tiles, cb_in, cb_out>(num_blocks, total_num_rows);
  */
 enum class TilizeGranularity : uint8_t {
     TILE,
@@ -30,13 +51,18 @@ enum class TilizeGranularity : uint8_t {
  * Handles non-tile-aligned heights by pushing full tile pages for the
  * last partial block (untouched rows contain stale data).
  *
- * With TILE granularity: pushes width_in_tiles pages per block.
- *   CB must be configured with page_size = tile_size.
- *   Compute tilize: tilize(num_blocks)
+ * With TILE granularity (default):
+ *   - CB must be configured with page_size = tile_size
+ *   - Pushes width_in_tiles pages per block
+ *   - Compute side: compute_kernel_lib::tilize<W, cb_in, cb_out>(num_blocks)
+ *   - CB sizing: double_buffer * width_in_tiles * tile_size
  *
- * With ROW granularity: pushes 1 page per row.
- *   CB must be configured with page_size = padded_row_bytes.
- *   Compute tilize: tilize(num_blocks, total_num_rows)
+ * With ROW granularity:
+ *   - CB must be configured with page_size = padded_row_bytes
+ *   - Pushes 1 page per row
+ *   - Compute side: compute_kernel_lib::tilize<W, cb_in, cb_out>(num_blocks, total_num_rows)
+ *   - CB sizing: double_buffer * min(tile_h, total_num_rows) * padded_row_bytes
+ *     (can be smaller than TILE mode when total_num_rows < tile_h)
  *
  * @tparam cb_id Circular buffer to write into (must be constexpr)
  * @tparam granularity TILE (default) or ROW
@@ -52,14 +78,18 @@ FORCE_INLINE void read_sticks_for_tilize(const Accessor& accessor, uint32_t tota
  * @brief Write untilized sticks from a CB to DRAM
  *
  * Reads total_num_rows worth of untilized data from the CB (produced by
- * the untilize compute helper) and writes the valid sticks to DRAM.
+ * the compute_kernel_lib::untilize helper from untilize_helpers.hpp) and
+ * writes the valid sticks to DRAM.
  *
  * Handles non-tile-aligned widths by skipping L1 padding between rows.
  * Handles non-tile-aligned heights by popping full tile pages for the
  * last partial block but only writing the valid rows.
  *
- * Always operates at TILE granularity (untilize compute always produces
- * tile-sized pages).
+ * Always operates at TILE granularity — the compute_kernel_lib::untilize
+ * helper always produces tile-sized pages on its output CB.
+ *
+ * Corresponding compute kernel:
+ *   compute_kernel_lib::untilize<width_tiles, cb_in, cb_out>(num_blocks);
  *
  * @tparam cb_id Circular buffer to read from (must be constexpr)
  * @tparam Accessor TensorAccessor type (deduced)
