@@ -27,13 +27,19 @@ DTYPES = [
     pytest.param(ttnn.float32, id="fp32"),
 ]
 
+GRANULARITIES = [
+    pytest.param(False, id="tile"),
+    pytest.param(True, id="row"),
+]
+
 # Build cross-product shape list with readable IDs
 SHAPES = [pytest.param((h, w), id=f"H{h}_W{w}") for h in HEIGHTS for w in WIDTHS]
 
 
+@pytest.mark.parametrize("use_row_granularity", GRANULARITIES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", SHAPES)
-def test_toy_tilize_untilize(device, shape, dtype):
+def test_toy_tilize_untilize(device, shape, dtype, use_row_granularity):
     """Identity test: tilize then untilize should return original data."""
     torch_dtype = torch.bfloat16 if dtype == ttnn.bfloat16 else torch.float32
     torch_input = torch.randn(shape, dtype=torch_dtype)
@@ -46,7 +52,7 @@ def test_toy_tilize_untilize(device, shape, dtype):
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
 
-    ttnn_output = toy_tilize_untilize(ttnn_input)
+    ttnn_output = toy_tilize_untilize(ttnn_input, use_row_granularity=use_row_granularity)
 
     assert list(ttnn_output.shape) == list(shape)
     torch_output = ttnn.to_torch(ttnn_output)
