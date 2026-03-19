@@ -7,6 +7,11 @@
 from models.tt_transformers.tt.load_checkpoints import map_hf_to_meta_keys, split_hf_keys
 
 
+def _is_moe_key(key):
+    """Check if a key belongs to MoE-specific weights that need protection from transforms."""
+    return any(pat in key for pat in ("mlp.experts", "mlp.gate.", "mlp.shared_expert"))
+
+
 def convert_hf_to_meta_qwen35(state_dict, head_dim, n_heads, n_kv_heads):
     """
     Convert Qwen3.5 HF checkpoint to meta format.
@@ -16,7 +21,18 @@ def convert_hf_to_meta_qwen35(state_dict, head_dim, n_heads, n_kv_heads):
       These keys are kept as-is (no meta format conversion needed for linear_attn weights).
     - full_attention layers: standard GQA with a gated q_proj (2x normal size, half is gate).
       The q_proj must be split into wq (query) and wq_gate before reverse_permute.
+
+    MoE variant (Qwen3.5-35B-A3B):
+    - Expert weights are packed 3D tensors (experts.gate_up_proj [256,1024,2048],
+      experts.down_proj [256,2048,512]) that must NOT be split by split_hf_keys.
+    - MoE keys must NOT go through map_hf_to_meta_keys (would rename gate_proj->w1
+      inside expert paths). Only mlp->feed_forward rename is applied.
     """
+    # Pop MoE keys before transforms to protect them
+    moe_keys = {k: v for k, v in state_dict.items() if _is_moe_key(k)}
+    if moe_keys:
+        state_dict = {k: v for k, v in state_dict.items() if not _is_moe_key(k)}
+
     # Step 1: Split fused keys (gate_up_proj, qkv_proj) if any
     state_dict = split_hf_keys(state_dict, n_heads, n_kv_heads)
 
@@ -66,5 +82,10 @@ def convert_hf_to_meta_qwen35(state_dict, head_dim, n_heads, n_kv_heads):
     # Step 3: Map HF keys to meta keys (linear_attn keys pass through since they
     # don't match any replacement patterns like self_attn, q_proj, etc.)
     converted_weights = map_hf_to_meta_keys(converted_weights)
+
+    # Step 4: Re-insert MoE keys with only mlp->feed_forward rename
+    for key, tensor in moe_keys.items():
+        new_key = key.replace(".mlp.", ".feed_forward.")
+        converted_weights[new_key] = tensor
 
     return converted_weights

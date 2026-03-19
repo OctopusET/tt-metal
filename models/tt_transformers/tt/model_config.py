@@ -2572,6 +2572,11 @@ class ModelArgs:
         self.num_experts_per_tok = text_config.get("num_experts_per_tok", 0)
         self.max_context_len = text_config.get("max_position_embeddings")
 
+        # MoE-specific config fields
+        self.num_experts = text_config.get("num_experts", 0)
+        self.moe_intermediate_size = text_config.get("moe_intermediate_size", None)
+        self.shared_expert_intermediate_size = text_config.get("shared_expert_intermediate_size", None)
+
         # Handle different MLP dimension specifications
         if "intermediate_size" in text_config:
             self.hidden_dim = text_config["intermediate_size"]
@@ -2587,6 +2592,12 @@ class ModelArgs:
                         params = json.load(f)
                     self.ffn_dim_multiplier = params["ffn_dim_multiplier"]
                     self.multiple_of = params["multiple_of"]
+        elif self.moe_intermediate_size is not None:
+            # MoE models (e.g. Qwen3.5-35B-A3B) have no intermediate_size,
+            # only moe_intermediate_size for expert MLPs.
+            self.hidden_dim = self.moe_intermediate_size
+            self.ffn_dim_multiplier = None
+            self.multiple_of = None
         else:
             self.ffn_dim_multiplier = text_config["ffn_dim_multiplier"]
             self.multiple_of = text_config["multiple_of"]
@@ -2644,6 +2655,7 @@ class ModelArgs:
         self.full_attention_interval = text_config.get("full_attention_interval", None)
         self.attn_output_gate = text_config.get("attn_output_gate", False)
         self.is_qwen35 = self.linear_num_key_heads is not None
+        self.is_qwen35_moe = self.is_qwen35 and self.num_experts > 0
         if self.is_qwen35:
             # Qwen3.5 uses HF-style RoPE (no reverse_permute needed for Q/K weights)
             # and partial rotary (only head_dim * partial_rotary_factor dims get RoPE)
@@ -2887,6 +2899,7 @@ class ModelArgs:
             "Attention": "attention",
             "GatedDeltaNet": "linear_attn",
             "GatedAttention": "attention",
+            "Qwen35MoE": "feed_forward",
             "TransformerBlock": "",
             "": "",  # If no module is given, just get layer prefix
         }
@@ -3048,7 +3061,9 @@ class ModelArgs:
                 state_dict.pop(k)
         if getattr(self, "is_mixture_of_experts", False):
             self.moe = True
-            self.num_experts = max([int(item[-11]) + 1 for item in keys_dict if "block_sparse_moe.experts" in item])
+            if not getattr(self, "is_qwen35_moe", False):
+                # Mixtral-style: expert number embedded in key like block_sparse_moe.experts.7.w1.weight
+                self.num_experts = max([int(item[-11]) + 1 for item in keys_dict if "block_sparse_moe.experts" in item])
         return state_dict
 
     # =========================================================================

@@ -39,6 +39,7 @@ class DeltaNetDecoderBlock(LightweightModule):
         weight_cache_path,
         prefetcher=None,
         attention_class=None,
+        mlp_class=None,
         mlp_dtype=None,
         mlp_weight_cache_path=None,
     ):
@@ -72,8 +73,9 @@ class DeltaNetDecoderBlock(LightweightModule):
             )
             self.attention.initialize_states()
 
-        # Standard MLP (same as TransformerBlock)
-        self.feed_forward = MLP(
+        # MLP: use custom class (e.g. Qwen35MoE) or standard MLP
+        mlp_cls = mlp_class or MLP
+        self.feed_forward = mlp_cls(
             mesh_device=mesh_device,
             tt_ccl=tt_ccl,
             args=args,
