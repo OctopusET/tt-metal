@@ -2,10 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Reader kernel for GatedDeltaNet: reads q, k, v, decay, beta, state from DRAM.
-// Each core handles one head. Tiles are read using noc_async_read_tile.
-
-#include <cstdint>
+#include <stdint.h>
 #include "api/dataflow/dataflow_api.h"
 
 constexpr uint32_t cb_q = get_compile_time_arg_val(0);
@@ -17,6 +14,14 @@ constexpr uint32_t cb_state = get_compile_time_arg_val(5);
 constexpr uint32_t D_TILES = get_compile_time_arg_val(6);
 constexpr uint32_t STATE_TILES = get_compile_time_arg_val(7);
 
+// TensorAccessor args start at compile-time arg 8
+constexpr auto q_acc_args = TensorAccessorArgs<8>();
+constexpr auto k_acc_args = TensorAccessorArgs<q_acc_args.next_compile_time_args_offset()>();
+constexpr auto v_acc_args = TensorAccessorArgs<k_acc_args.next_compile_time_args_offset()>();
+constexpr auto decay_acc_args = TensorAccessorArgs<v_acc_args.next_compile_time_args_offset()>();
+constexpr auto beta_acc_args = TensorAccessorArgs<decay_acc_args.next_compile_time_args_offset()>();
+constexpr auto state_acc_args = TensorAccessorArgs<beta_acc_args.next_compile_time_args_offset()>();
+
 void kernel_main() {
     uint32_t q_addr = get_arg_val<uint32_t>(0);
     uint32_t k_addr = get_arg_val<uint32_t>(1);
@@ -25,68 +30,61 @@ void kernel_main() {
     uint32_t beta_addr = get_arg_val<uint32_t>(4);
     uint32_t state_addr = get_arg_val<uint32_t>(5);
     uint32_t head_start = get_arg_val<uint32_t>(6);
-    uint32_t num_heads_this_core = get_arg_val<uint32_t>(7);
-    uint32_t bf16_tile_bytes = get_arg_val<uint32_t>(8);
-    uint32_t fp32_tile_bytes = get_arg_val<uint32_t>(9);
+    uint32_t num_heads = get_arg_val<uint32_t>(7);
 
-    // For interleaved tile layout, tile index = head * tiles_per_head + offset
-    // q,k,v: (1, H, 1, D) -> H * D_TILES tiles, head h starts at h * D_TILES
-    // decay,beta: (1, H, 1, 1) -> H tiles, head h is tile h
-    // state: (1, H, D, D) -> H * STATE_TILES tiles, head h starts at h * STATE_TILES
+    const uint32_t bf16_tile_bytes = get_tile_size(cb_q);
+    const uint32_t fp32_tile_bytes = get_tile_size(cb_state);
 
-    for (uint32_t hh = 0; hh < num_heads_this_core; hh++) {
+    const auto q_acc = TensorAccessor(q_acc_args, q_addr, bf16_tile_bytes);
+    const auto k_acc = TensorAccessor(k_acc_args, k_addr, bf16_tile_bytes);
+    const auto v_acc = TensorAccessor(v_acc_args, v_addr, bf16_tile_bytes);
+    const auto decay_acc = TensorAccessor(decay_acc_args, decay_addr, bf16_tile_bytes);
+    const auto beta_acc = TensorAccessor(beta_acc_args, beta_addr, bf16_tile_bytes);
+    const auto state_acc = TensorAccessor(state_acc_args, state_addr, fp32_tile_bytes);
+
+    for (uint32_t hh = 0; hh < num_heads; hh++) {
         uint32_t h = head_start + hh;
 
-        // Read q vector (D_TILES bf16 tiles)
-        uint32_t q_tile_start = h * D_TILES;
+        // Read q (D_TILES bf16 tiles)
         for (uint32_t t = 0; t < D_TILES; t++) {
             cb_reserve_back(cb_q, 1);
-            uint64_t q_noc_addr = get_noc_addr(q_tile_start + t, q_addr, bf16_tile_bytes);
-            noc_async_read(q_noc_addr, get_write_ptr(cb_q), bf16_tile_bytes);
+            noc_async_read_tile(h * D_TILES + t, q_acc, get_write_ptr(cb_q));
             noc_async_read_barrier();
             cb_push_back(cb_q, 1);
         }
 
-        // Read k vector
-        uint32_t k_tile_start = h * D_TILES;
+        // Read k
         for (uint32_t t = 0; t < D_TILES; t++) {
             cb_reserve_back(cb_k, 1);
-            uint64_t k_noc_addr = get_noc_addr(k_tile_start + t, k_addr, bf16_tile_bytes);
-            noc_async_read(k_noc_addr, get_write_ptr(cb_k), bf16_tile_bytes);
+            noc_async_read_tile(h * D_TILES + t, k_acc, get_write_ptr(cb_k));
             noc_async_read_barrier();
             cb_push_back(cb_k, 1);
         }
 
-        // Read v vector
-        uint32_t v_tile_start = h * D_TILES;
+        // Read v
         for (uint32_t t = 0; t < D_TILES; t++) {
             cb_reserve_back(cb_v, 1);
-            uint64_t v_noc_addr = get_noc_addr(v_tile_start + t, v_addr, bf16_tile_bytes);
-            noc_async_read(v_noc_addr, get_write_ptr(cb_v), bf16_tile_bytes);
+            noc_async_read_tile(h * D_TILES + t, v_acc, get_write_ptr(cb_v));
             noc_async_read_barrier();
             cb_push_back(cb_v, 1);
         }
 
         // Read decay (1 tile)
         cb_reserve_back(cb_decay, 1);
-        uint64_t decay_noc_addr = get_noc_addr(h, decay_addr, bf16_tile_bytes);
-        noc_async_read(decay_noc_addr, get_write_ptr(cb_decay), bf16_tile_bytes);
+        noc_async_read_tile(h, decay_acc, get_write_ptr(cb_decay));
         noc_async_read_barrier();
         cb_push_back(cb_decay, 1);
 
         // Read beta (1 tile)
         cb_reserve_back(cb_beta, 1);
-        uint64_t beta_noc_addr = get_noc_addr(h, beta_addr, bf16_tile_bytes);
-        noc_async_read(beta_noc_addr, get_write_ptr(cb_beta), bf16_tile_bytes);
+        noc_async_read_tile(h, beta_acc, get_write_ptr(cb_beta));
         noc_async_read_barrier();
         cb_push_back(cb_beta, 1);
 
         // Read state (STATE_TILES fp32 tiles)
-        uint32_t state_tile_start = h * STATE_TILES;
         for (uint32_t t = 0; t < STATE_TILES; t++) {
             cb_reserve_back(cb_state, 1);
-            uint64_t s_noc_addr = get_noc_addr(state_tile_start + t, state_addr, fp32_tile_bytes);
-            noc_async_read(s_noc_addr, get_write_ptr(cb_state), fp32_tile_bytes);
+            noc_async_read_tile(h * STATE_TILES + t, state_acc, get_write_ptr(cb_state));
             noc_async_read_barrier();
             cb_push_back(cb_state, 1);
         }

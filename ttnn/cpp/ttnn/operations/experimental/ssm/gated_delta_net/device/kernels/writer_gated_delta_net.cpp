@@ -2,9 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Writer kernel for GatedDeltaNet: writes output vector and updated state to DRAM.
-
-#include <cstdint>
+#include <stdint.h>
 #include "api/dataflow/dataflow_api.h"
 
 constexpr uint32_t cb_out = get_compile_time_arg_val(0);
@@ -12,37 +10,41 @@ constexpr uint32_t cb_state_new = get_compile_time_arg_val(1);
 constexpr uint32_t D_TILES = get_compile_time_arg_val(2);
 constexpr uint32_t STATE_TILES = get_compile_time_arg_val(3);
 
+// TensorAccessor args start at compile-time arg 4
+constexpr auto out_acc_args = TensorAccessorArgs<4>();
+constexpr auto state_acc_args = TensorAccessorArgs<out_acc_args.next_compile_time_args_offset()>();
+
 void kernel_main() {
     uint32_t out_addr = get_arg_val<uint32_t>(0);
     uint32_t state_addr = get_arg_val<uint32_t>(1);
     uint32_t head_start = get_arg_val<uint32_t>(2);
-    uint32_t num_heads_this_core = get_arg_val<uint32_t>(3);
-    uint32_t bf16_tile_bytes = get_arg_val<uint32_t>(4);
-    uint32_t fp32_tile_bytes = get_arg_val<uint32_t>(5);
+    uint32_t num_heads = get_arg_val<uint32_t>(3);
 
-    for (uint32_t hh = 0; hh < num_heads_this_core; hh++) {
+    const uint32_t bf16_tile_bytes = get_tile_size(cb_out);
+    const uint32_t fp32_tile_bytes = get_tile_size(cb_state_new);
+
+    const auto out_acc = TensorAccessor(out_acc_args, out_addr, bf16_tile_bytes);
+    const auto state_acc = TensorAccessor(state_acc_args, state_addr, fp32_tile_bytes);
+
+    for (uint32_t hh = 0; hh < num_heads; hh++) {
         uint32_t h = head_start + hh;
 
-        // Write output vector (D_TILES bf16 tiles)
-        uint32_t out_tile_start = h * D_TILES;
+        // Write output (D_TILES bf16 tiles)
         cb_wait_front(cb_out, D_TILES);
-        uint32_t out_l1_addr = get_read_ptr(cb_out);
+        uint32_t out_l1 = get_read_ptr(cb_out);
         for (uint32_t t = 0; t < D_TILES; t++) {
-            uint64_t out_noc_addr = get_noc_addr(out_tile_start + t, out_addr, bf16_tile_bytes);
-            noc_async_write(out_l1_addr, out_noc_addr, bf16_tile_bytes);
-            out_l1_addr += bf16_tile_bytes;
+            noc_async_write_tile(h * D_TILES + t, out_acc, out_l1);
+            out_l1 += bf16_tile_bytes;
         }
         noc_async_write_barrier();
         cb_pop_front(cb_out, D_TILES);
 
         // Write updated state (STATE_TILES fp32 tiles)
-        uint32_t state_tile_start = h * STATE_TILES;
         cb_wait_front(cb_state_new, STATE_TILES);
-        uint32_t state_l1_addr = get_read_ptr(cb_state_new);
+        uint32_t state_l1 = get_read_ptr(cb_state_new);
         for (uint32_t t = 0; t < STATE_TILES; t++) {
-            uint64_t s_noc_addr = get_noc_addr(state_tile_start + t, state_addr, fp32_tile_bytes);
-            noc_async_write(state_l1_addr, s_noc_addr, fp32_tile_bytes);
-            state_l1_addr += fp32_tile_bytes;
+            noc_async_write_tile(h * STATE_TILES + t, state_acc, state_l1);
+            state_l1 += fp32_tile_bytes;
         }
         noc_async_write_barrier();
         cb_pop_front(cb_state_new, STATE_TILES);
