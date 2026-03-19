@@ -18,6 +18,6 @@ std::vector<Tensor> gated_delta_net(
     const Tensor& beta,
     const Tensor& state,
     float scale = 1.0f,
-    const std::optional<MemoryConfig>& memory_config = std::nullopt);
+    const std::optional<tt::tt_metal::MemoryConfig>& memory_config = std::nullopt);
 
 }  // namespace ttnn::experimental
