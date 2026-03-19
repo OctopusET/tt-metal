@@ -133,10 +133,12 @@ public:
 
     H2DMode get_h2d_mode() const;
 
-private:
-    H2DSocket() = default;
+public:
     H2DSocket(const H2DSocket&) = delete;
     H2DSocket& operator=(const H2DSocket&) = delete;
+
+private:
+    H2DSocket() = default;
 
     struct PinnedBufferInfo {
         uint32_t pcie_xy_enc = 0;
