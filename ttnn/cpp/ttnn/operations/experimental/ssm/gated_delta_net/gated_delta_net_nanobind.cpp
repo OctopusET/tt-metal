@@ -8,6 +8,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/vector.h>
 
 #include "ttnn-nanobind/bind_function.hpp"
 #include "gated_delta_net.hpp"
