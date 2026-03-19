@@ -162,7 +162,7 @@ class Qwen35MoE(LightweightModule):
             )  # [1,1,B, 2*intermediate]
 
             # Split into gate and up halves (split_size = intermediate, produces 2 chunks)
-            gate_out, up_out = ttnn.split(gate_up_out, self.moe_intermediate_size, dim=-1)
+            gate_out, up_out = ttnn.split(gate_up_out, self.moe_intermediate_size, dim=3)
             ttnn.deallocate(gate_up_out)
 
             hidden = ttnn.mul(
