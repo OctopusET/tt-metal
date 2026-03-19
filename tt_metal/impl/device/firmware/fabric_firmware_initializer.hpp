@@ -41,6 +41,9 @@ private:
     tt::tt_fabric::ControlPlane& control_plane_;
     std::vector<Device*> devices_;
     bool initialized_ = false;
+
+    // Fabric program that was created for each of the devices from init()
+    std::unordered_map<Device*, std::unique_ptr<Program>> fabric_programs_;
 };
 
 }  // namespace tt::tt_metal

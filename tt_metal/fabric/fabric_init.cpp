@@ -48,11 +48,7 @@ std::unique_ptr<tt::tt_metal::Program> create_and_compile_tt_fabric_program(tt::
 }
 
 std::unique_ptr<tt::tt_metal::Program> create_and_compile_fabric_program(tt::tt_metal::IDevice* device) {
-    auto fabric_config = tt::tt_metal::MetalContext::instance().get_fabric_config();
-    if (tt_fabric::is_tt_fabric_config(fabric_config)) {
-        return create_and_compile_tt_fabric_program(device);
-    }
-    return nullptr;
+    return create_and_compile_tt_fabric_program(device);
 }
 
 void configure_fabric_cores(tt::tt_metal::IDevice* device) {

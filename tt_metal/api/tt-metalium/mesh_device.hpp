@@ -171,10 +171,6 @@ public:
     void init_command_queue_host() override;
     [[deprecated("This is an internal function. It will be removed.")]]
     void init_command_queue_device() override;
-    [[deprecated("This is an internal function. It will be removed.")]]
-    bool compile_fabric() override;
-    [[deprecated("This is an internal function. It will be removed.")]]
-    void configure_fabric() override;
     bool close() override;
     void enable_program_cache() override;
     void clear_program_cache() override;

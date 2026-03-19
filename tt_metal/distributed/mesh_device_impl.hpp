@@ -277,8 +277,6 @@ public:
         bool minimal = false);
     void init_command_queue_host() override;
     void init_command_queue_device() override;
-    bool compile_fabric() override;
-    void configure_fabric() override;
     bool close() override;
     bool close_impl(MeshDevice* pimpl_wrapper);
     void enable_program_cache() override;

@@ -157,11 +157,6 @@ public:
     [[deprecated("This is an internal function. It will be removed.")]]
     virtual void init_command_queue_device() = 0;
 
-    // return false if compile fails (mainly come from Nebula on TG)
-    [[deprecated("This is an internal function. It will be removed.")]]
-    virtual bool compile_fabric() = 0;
-    [[deprecated("This is an internal function. It will be removed.")]]
-    virtual void configure_fabric() = 0;
     // Puts device into reset
     virtual bool close() = 0;
 
