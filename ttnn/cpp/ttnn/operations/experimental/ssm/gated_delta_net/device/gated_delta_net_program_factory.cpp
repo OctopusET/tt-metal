@@ -8,6 +8,7 @@
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/work_split.hpp>
+#include <tt-metalium/tensor_accessor_args.hpp>
 
 using namespace tt::tt_metal;
 
@@ -78,10 +79,30 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
     create_cb(cb_delta_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_k_t_id, D_TILES, bf16_tile_size, bf16_format);
 
-    // Compile-time args for kernels
+    // Get buffers for TensorAccessorArgs
+    auto* q_buffer = tensor_args.q.buffer();
+    auto* k_buffer = tensor_args.k.buffer();
+    auto* v_buffer = tensor_args.v.buffer();
+    auto* decay_buffer = tensor_args.decay.buffer();
+    auto* beta_buffer = tensor_args.beta.buffer();
+    auto* state_buffer = tensor_args.state.buffer();
+    auto* output_buffer = output.buffer();
+    auto* new_state_buffer = new_state.buffer();
+
+    // Compile-time args for reader (CB ids + dims + TensorAccessorArgs for 6 inputs)
     std::vector<uint32_t> reader_ct_args = {
         cb_q_id, cb_k_id, cb_v_id, cb_decay_id, cb_beta_id, cb_state_id, D_TILES, STATE_TILES};
+    tt::tt_metal::TensorAccessorArgs(q_buffer).append_to(reader_ct_args);
+    tt::tt_metal::TensorAccessorArgs(k_buffer).append_to(reader_ct_args);
+    tt::tt_metal::TensorAccessorArgs(v_buffer).append_to(reader_ct_args);
+    tt::tt_metal::TensorAccessorArgs(decay_buffer).append_to(reader_ct_args);
+    tt::tt_metal::TensorAccessorArgs(beta_buffer).append_to(reader_ct_args);
+    tt::tt_metal::TensorAccessorArgs(state_buffer).append_to(reader_ct_args);
+
+    // Compile-time args for writer (CB ids + dims + TensorAccessorArgs for 2 outputs)
     std::vector<uint32_t> writer_ct_args = {cb_out_id, cb_state_new_id, D_TILES, STATE_TILES};
+    tt::tt_metal::TensorAccessorArgs(output_buffer).append_to(writer_ct_args);
+    tt::tt_metal::TensorAccessorArgs(new_state_buffer).append_to(writer_ct_args);
     std::vector<uint32_t> compute_ct_args = {
         cb_q_id,
         cb_k_id,
@@ -142,30 +163,14 @@ void GatedDeltaNetProgramFactory::override_runtime_arguments(
     const GatedDeltaNetParams& /*operation_attributes*/,
     const GatedDeltaNetInputs& tensor_args,
     std::vector<Tensor>& tensor_return_value) {
-    [[maybe_unused]] auto& output = tensor_return_value[0];
-    [[maybe_unused]] auto& new_state = tensor_return_value[1];
+    auto& output = tensor_return_value[0];
+    auto& new_state = tensor_return_value[1];
     auto& program = cached_program.program;
     const auto& sv = cached_program.shared_variables;
 
-    auto* q_buffer = tensor_args.q.buffer();
-    auto* k_buffer = tensor_args.k.buffer();
-    auto* v_buffer = tensor_args.v.buffer();
-    auto* decay_buffer = tensor_args.decay.buffer();
-    auto* beta_buffer = tensor_args.beta.buffer();
-    auto* state_buffer = tensor_args.state.buffer();
-    auto* output_buffer = output.buffer();
-    auto* new_state_buffer = new_state.buffer();
-
-    [[maybe_unused]] const uint32_t D_TILES = sv.head_dim / TILE_WIDTH;
-
-    // bf16 and fp32 tile sizes
-    const uint32_t bf16_tile_size = tt::tile_size(tt::DataFormat::Float16_b);
-    const uint32_t fp32_tile_size = tt::tile_size(tt::DataFormat::Float32);
-
-    // Set per-core runtime args: buffer base addresses + head offset
+    // Set per-core runtime args: buffer addresses + head index
     for (uint32_t i = 0; i < sv.cores.size(); i++) {
-        // Reader: base addresses + head_start + num_heads_this_core
-        uint32_t head_start = i;  // 1 head per core (simplified)
+        uint32_t head_start = i;
         uint32_t num_heads_this_core = 1;
 
         SetRuntimeArgs(
@@ -173,16 +178,14 @@ void GatedDeltaNetProgramFactory::override_runtime_arguments(
             sv.reader_kernel_id,
             sv.cores[i],
             {
-                q_buffer->address(),
-                k_buffer->address(),
-                v_buffer->address(),
-                decay_buffer->address(),
-                beta_buffer->address(),
-                state_buffer->address(),
+                tensor_args.q.buffer()->address(),
+                tensor_args.k.buffer()->address(),
+                tensor_args.v.buffer()->address(),
+                tensor_args.decay.buffer()->address(),
+                tensor_args.beta.buffer()->address(),
+                tensor_args.state.buffer()->address(),
                 head_start,
                 num_heads_this_core,
-                bf16_tile_size,
-                fp32_tile_size,
             });
 
         SetRuntimeArgs(
@@ -190,12 +193,10 @@ void GatedDeltaNetProgramFactory::override_runtime_arguments(
             sv.writer_kernel_id,
             sv.cores[i],
             {
-                output_buffer->address(),
-                new_state_buffer->address(),
+                output.buffer()->address(),
+                new_state.buffer()->address(),
                 head_start,
                 num_heads_this_core,
-                bf16_tile_size,
-                fp32_tile_size,
             });
 
         SetRuntimeArgs(
