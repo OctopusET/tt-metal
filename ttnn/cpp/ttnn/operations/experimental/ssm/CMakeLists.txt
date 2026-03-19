@@ -13,6 +13,7 @@ set_target_properties(
 
 file(
     GLOB_RECURSE kernels
+    gated_delta_net/device/kernels/*
     hc_sum_reduce/device/kernels/*
     prefix_scan/device/kernels/*
     repeat_and_interleave_eltwise_mul/device/kernels/*
@@ -30,6 +31,9 @@ target_sources(
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
         FILES ${kernels}
     PRIVATE
+        gated_delta_net/device/gated_delta_net_device_operation.cpp
+        gated_delta_net/device/gated_delta_net_program_factory.cpp
+        gated_delta_net/gated_delta_net.cpp
         hc_sum_reduce/device/hc_sum_reduce_device_operation.cpp
         hc_sum_reduce/device/hc_sum_reduce_program_factory.cpp
         hc_sum_reduce/hc_sum_reduce.cpp
