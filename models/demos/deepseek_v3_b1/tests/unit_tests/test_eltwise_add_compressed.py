@@ -11,12 +11,14 @@ import torch
 from loguru import logger
 
 import ttnn
+from models.common.utility_functions import skip_with_llk_assert
 from models.demos.deepseek_v3_b1.compressed_tensor import CompressedTensor, CompressedTensorAssigner
 from models.demos.deepseek_v3_b1.micro_ops.eltwise_add_compressed.op import EltwiseAddCompressed
 from models.demos.deepseek_v3_b1.tests.unit_tests.test_compressed_tensor import _make_sharded_mem_config
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_pcc
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def scale_tiles_for_mixed_formats(b_torch, formats):
     """Adjust tiles so the assigner picks different formats.
 
@@ -59,6 +61,7 @@ def scale_tiles_for_mixed_formats(b_torch, formats):
         # bfp4: keep randn as-is
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def _run_eltwise_add_compressed(
     device,
     M,
@@ -126,51 +129,61 @@ def _run_eltwise_add_compressed(
 # --- Single-core tests ---
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_1tile_bfp2(device):
     """1 tile, bfp2 only."""
     _run_eltwise_add_compressed(device, 32, 32, formats=["bfp2"], pcc_threshold=0.94)
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_4tile_bfp2(device):
     """4 tiles (64x64), bfp2 only."""
     _run_eltwise_add_compressed(device, 64, 64, formats=["bfp2"], pcc_threshold=0.94)
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_1tile_bfp4(device):
     """1 tile, bfp4 only."""
     _run_eltwise_add_compressed(device, 32, 32, formats=["bfp4"])
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_4tile_bfp4(device):
     """4 tiles (64x64), bfp4 only."""
     _run_eltwise_add_compressed(device, 64, 64, formats=["bfp4"])
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_1tile_bfp8(device):
     """1 tile, bfp8 only."""
     _run_eltwise_add_compressed(device, 32, 32, formats=["bfp8"])
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_4tile_bfp8(device):
     """4 tiles (64x64), bfp8 only."""
     _run_eltwise_add_compressed(device, 64, 64, formats=["bfp8"])
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2tile_mixed(device):
     """2 tiles (64x32), mixed bfp4 + bfp8."""
     _run_eltwise_add_compressed(device, 64, 32, formats=["bfp8", "bfp4"])
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_4tile_mixed(device):
     """4 tiles (64x64), mixed bfp4 + bfp8."""
     _run_eltwise_add_compressed(device, 64, 64, formats=["bfp8", "bfp4"])
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_16tile_mixed(device):
     """16 tiles (128x128), mixed bfp4 + bfp8."""
     _run_eltwise_add_compressed(device, 128, 128, formats=["bfp8", "bfp4"])
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_16tile_mixed_all_formats(device):
     """16 tiles (128x128), mixed bfp2 + bfp8."""
     _run_eltwise_add_compressed(
@@ -181,21 +194,25 @@ def test_eltwise_add_compressed_16tile_mixed_all_formats(device):
 # --- Multi-core HEIGHT_SHARDED tests ---
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2core_bfp8(device):
     """2 cores, 64x32 (1 tile/core), bfp8."""
     _run_eltwise_add_compressed(device, 64, 32, formats=["bfp8"], num_cores_h=2)
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_4core_mixed(device):
     """4 cores, 128x32 (1 tile/core), mixed bfp4 + bfp8."""
     _run_eltwise_add_compressed(device, 128, 32, formats=["bfp8", "bfp4"], num_cores_h=4)
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2core_4tile_mixed(device):
     """2 cores, 128x64 (4 tiles/core), mixed bfp4 + bfp8."""
     _run_eltwise_add_compressed(device, 128, 64, formats=["bfp8", "bfp4"], num_cores_h=2)
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_8core_all_formats(device):
     """8 cores, 256x128 (4 tiles/core), all formats."""
     _run_eltwise_add_compressed(
@@ -206,11 +223,13 @@ def test_eltwise_add_compressed_8core_all_formats(device):
 # --- Uneven sharding tests ---
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_3core_uneven(device):
     """3 cores, 96x32. 96/3 = 32 rows/core, evenly split."""
     _run_eltwise_add_compressed(device, 96, 32, formats=["bfp8", "bfp4"], num_cores_h=3)
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_3core_uneven_large(device):
     """128/3 -> div_up=43 -> align to 64. Last core gets padded."""
     _run_eltwise_add_compressed(
@@ -218,6 +237,7 @@ def test_eltwise_add_compressed_3core_uneven_large(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_5core_uneven(device):
     """192/5 -> div_up=39 -> align to 64. Last cores get padded."""
     _run_eltwise_add_compressed(
@@ -228,6 +248,7 @@ def test_eltwise_add_compressed_5core_uneven(device):
 # --- WIDTH_SHARDED tests ---
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2core_width(device):
     """2 cores width-sharded, 32x64 (1 tile/core), bfp8."""
     _run_eltwise_add_compressed(
@@ -240,6 +261,7 @@ def test_eltwise_add_compressed_2core_width(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_4core_width_mixed(device):
     """4 cores width-sharded, 64x128 (2 tiles/core), mixed bfp4 + bfp8."""
     _run_eltwise_add_compressed(
@@ -252,6 +274,7 @@ def test_eltwise_add_compressed_4core_width_mixed(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_3core_width_uneven(device):
     """3 cores width-sharded, 64x96, uneven. div_up(96,3)=32."""
     _run_eltwise_add_compressed(
@@ -264,6 +287,7 @@ def test_eltwise_add_compressed_3core_width_uneven(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_4core_width_all_formats(device):
     """4 cores width-sharded, 64x128, all formats."""
     _run_eltwise_add_compressed(
@@ -281,6 +305,7 @@ def test_eltwise_add_compressed_4core_width_all_formats(device):
 # --- BLOCK_SHARDED tests ---
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2x2_block(device):
     """2x2 block-sharded, 64x64 (1 tile/core), bfp8."""
     _run_eltwise_add_compressed(
@@ -294,6 +319,7 @@ def test_eltwise_add_compressed_2x2_block(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2x2_block_mixed(device):
     """2x2 block-sharded, 128x128 (4 tiles/core), mixed bfp4 + bfp8."""
     _run_eltwise_add_compressed(
@@ -307,6 +333,7 @@ def test_eltwise_add_compressed_2x2_block_mixed(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2x2_block_all_formats(device):
     """2x2 block-sharded, 128x128 (4 tiles/core), all formats."""
     _run_eltwise_add_compressed(
@@ -322,6 +349,7 @@ def test_eltwise_add_compressed_2x2_block_all_formats(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2x3_block_uneven(device):
     """2x3 block-sharded, 64x128, uneven width. div_up(128,3)=43 -> align 64."""
     _run_eltwise_add_compressed(
@@ -337,6 +365,7 @@ def test_eltwise_add_compressed_2x3_block_uneven(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_3x2_block_uneven(device):
     """3x2 block-sharded, 128x64, uneven height. div_up(128,3)=43 -> align 64."""
     _run_eltwise_add_compressed(
@@ -355,16 +384,19 @@ def test_eltwise_add_compressed_3x2_block_uneven(device):
 # --- BFP0 tests (zero tiles) ---
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_4tile_mixed_bfp80(device):
     """4 tiles (64x64), mixed bfp8 + bfp0."""
     _run_eltwise_add_compressed(device, 64, 64, formats=["bfp8", "bfp0"])
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2core_mixed_bfp80(device):
     """2 cores height-sharded, 64x64 (2 tiles/core), mixed bfp8 + bfp0."""
     _run_eltwise_add_compressed(device, 64, 64, formats=["bfp8", "bfp0"], num_cores_h=2)
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_16tile_mixed_bfp8420(device):
     """4 tiles (128x128), all formats bfp8 + bfp4 + bfp2 + bfp0."""
     _run_eltwise_add_compressed(
@@ -372,6 +404,7 @@ def test_eltwise_add_compressed_16tile_mixed_bfp8420(device):
     )
 
 
+@skip_with_llk_assert("Hit LLK_ASSERT for unpacker configuration verification. Issue: #39476")
 def test_eltwise_add_compressed_2x2_block_all_with_bfp0(device):
     """2x2 block-sharded, 128x128, all formats bfp8 + bfp4 + bfp2 + bfp0."""
     _run_eltwise_add_compressed(
