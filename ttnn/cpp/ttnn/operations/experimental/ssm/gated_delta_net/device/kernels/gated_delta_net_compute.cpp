@@ -123,7 +123,7 @@ void kernel_main() {
         // ===============================================================
         // Transpose k: row-0 data -> column-0 data
         cb_reserve_back(cb_k_t, D_TILES);
-        transpose_wh_init(cb_k);
+        transpose_wh_init(cb_k, cb_k_t);
         for (uint32_t r = 0; r < D_TILES; r++) {
             tile_regs_acquire();
             transpose_wh_tile(cb_k, r, 0);
