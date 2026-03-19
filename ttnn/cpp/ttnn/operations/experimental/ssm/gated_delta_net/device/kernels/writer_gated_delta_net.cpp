@@ -29,17 +29,7 @@ void kernel_main() {
     for (uint32_t hh = 0; hh < num_heads; hh++) {
         uint32_t h = head_start + hh;
 
-        // Write output (D_TILES bf16 tiles)
-        cb_wait_front(cb_out, D_TILES);
-        uint32_t out_l1 = get_read_ptr(cb_out);
-        for (uint32_t t = 0; t < D_TILES; t++) {
-            noc_async_write_tile(h * D_TILES + t, out_acc, out_l1);
-            out_l1 += bf16_tile_bytes;
-        }
-        noc_async_write_barrier();
-        cb_pop_front(cb_out, D_TILES);
-
-        // Write updated state (STATE_TILES fp32 tiles)
+        // Write updated state FIRST (compute produces this first)
         cb_wait_front(cb_state_new, STATE_TILES);
         uint32_t state_l1 = get_read_ptr(cb_state_new);
         for (uint32_t t = 0; t < STATE_TILES; t++) {
@@ -48,5 +38,15 @@ void kernel_main() {
         }
         noc_async_write_barrier();
         cb_pop_front(cb_state_new, STATE_TILES);
+
+        // Write output SECOND (compute produces this second)
+        cb_wait_front(cb_out, D_TILES);
+        uint32_t out_l1 = get_read_ptr(cb_out);
+        for (uint32_t t = 0; t < D_TILES; t++) {
+            noc_async_write_tile(h * D_TILES + t, out_acc, out_l1);
+            out_l1 += bf16_tile_bytes;
+        }
+        noc_async_write_barrier();
+        cb_pop_front(cb_out, D_TILES);
     }
 }
