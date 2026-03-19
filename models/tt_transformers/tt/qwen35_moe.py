@@ -161,8 +161,8 @@ class Qwen35MoE(LightweightModule):
                 x, self.expert_gate_up[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG
             )  # [1,1,B, 2*intermediate]
 
-            # Split into gate and up halves
-            gate_out, up_out = ttnn.split(gate_up_out, 2, dim=-1)
+            # Split into gate and up halves (split_size = intermediate, produces 2 chunks)
+            gate_out, up_out = ttnn.split(gate_up_out, self.moe_intermediate_size, dim=-1)
             ttnn.deallocate(gate_up_out)
 
             hidden = ttnn.mul(
