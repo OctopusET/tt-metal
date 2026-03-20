@@ -116,8 +116,9 @@ class Qwen35MoE(LightweightModule):
         self.shared_w3 = load_shared("up_proj")  # [1,1,hidden,intermediate]
         self.shared_w2 = load_shared("down_proj")  # [1,1,intermediate,hidden]
 
-        # Shared expert gate (scalar sigmoid gate)
-        self.shared_gate_weight = state_dict[f"{prefix}.shared_expert_gate.weight"].float()  # [1]
+        # Shared expert gate: Linear(hidden_size, 1) -> sigmoid -> per-token scalar gate
+        # Weight shape: [1, hidden_size]. Compute on host since it's a single dot product.
+        self.shared_gate_weight = state_dict[f"{prefix}.shared_expert_gate.weight"].float()  # [1, hidden_size]
 
     def forward(self, x, mode=None):
         """
@@ -146,8 +147,8 @@ class Qwen35MoE(LightweightModule):
         ttnn.deallocate(shared_up)
         shared_out = ttnn.linear(shared_out, self.shared_w2, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        # Apply shared expert gate (sigmoid)
-        gate_val = torch.sigmoid(self.shared_gate_weight).item()
+        # Apply shared expert gate: sigmoid(x @ gate_weight.T) -> per-token scalar
+        gate_val = torch.sigmoid(token_vec @ self.shared_gate_weight.T).item()  # scalar
         shared_out = ttnn.multiply(shared_out, gate_val, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         # --- Routed experts (top-k, sequential) ---
