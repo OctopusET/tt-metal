@@ -99,12 +99,10 @@ class Qwen35MoE(LightweightModule):
         shared_prefix = f"{prefix}.shared_expert"
         shared_dtype = dtype  # bfp8
 
-        def load_shared(name, shape_transpose=True):
+        def load_shared(name):
             w = state_dict[f"{shared_prefix}.{name}.weight"]
-            if shape_transpose:
-                w = w.T
             return ttnn.as_tensor(
-                w.unsqueeze(0).unsqueeze(0).contiguous(),
+                w.T.unsqueeze(0).unsqueeze(0).contiguous(),
                 dtype=shared_dtype,
                 device=mesh_device,
                 layout=ttnn.TILE_LAYOUT,
@@ -117,25 +115,15 @@ class Qwen35MoE(LightweightModule):
         self.shared_w2 = load_shared("down_proj")  # [1,1,intermediate,hidden]
 
         # Shared expert gate: Linear(hidden_size, 1) -> sigmoid -> per-token scalar gate
-        # Weight shape: [1, hidden_size]. Compute on host since it's a single dot product.
         self.shared_gate_weight = state_dict[f"{prefix}.shared_expert_gate.weight"].float()  # [1, hidden_size]
 
     def forward(self, x, mode=None):
         """
         x: [1, 1, B, hidden_size] on device (B=32 padded batch, only row 0 used for decode)
-
         Returns: [1, 1, B, hidden_size] on device
         """
-        # --- Host routing ---
-        x_cpu = ttnn.to_torch(x).float()  # [1, 1, B, hidden]
-        token_vec = x_cpu[0, 0, 0, : self.hidden_size]  # [hidden]
-
-        # Router logits and top-k selection
-        logits = token_vec @ self.router_weight.T  # [num_experts]
-        topk_vals, topk_ids = torch.topk(logits, self.num_experts_per_tok)  # [k]
-        weights = F.softmax(topk_vals, dim=-1)  # [k] renormalized
-
-        # --- Shared expert (always on) ---
+        # --- Queue shared expert on device BEFORE sync ---
+        # These ops are submitted to the command queue and execute while we wait for to_torch.
         shared_out = ttnn.linear(x, self.shared_w1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         shared_up = ttnn.linear(x, self.shared_w3, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         shared_out = ttnn.mul(
@@ -147,11 +135,21 @@ class Qwen35MoE(LightweightModule):
         ttnn.deallocate(shared_up)
         shared_out = ttnn.linear(shared_out, self.shared_w2, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        # Apply shared expert gate: sigmoid(x @ gate_weight.T) -> per-token scalar
-        gate_val = torch.sigmoid(token_vec @ self.shared_gate_weight.T).item()  # scalar
+        # --- Single sync: read x to host for routing ---
+        # By the time this returns, shared expert matmuls above have completed.
+        x_cpu = ttnn.to_torch(x).float()  # [1, 1, B, hidden]
+        token_vec = x_cpu[0, 0, 0, : self.hidden_size]  # [hidden]
+
+        # Host routing (near-instant)
+        logits = token_vec @ self.router_weight.T  # [num_experts]
+        topk_vals, topk_ids = torch.topk(logits, self.num_experts_per_tok)  # [k]
+        weights = F.softmax(topk_vals, dim=-1)  # [k] renormalized
+
+        # Shared expert gate (host, trivial)
+        gate_val = torch.sigmoid(token_vec @ self.shared_gate_weight.T).item()
         shared_out = ttnn.multiply(shared_out, gate_val, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        # --- Routed experts (top-k, sequential) ---
+        # --- Routed experts (top-k, sequential on device) ---
         result = shared_out
         for i in range(self.num_experts_per_tok):
             eid = topk_ids[i].item()
@@ -162,7 +160,7 @@ class Qwen35MoE(LightweightModule):
                 x, self.expert_gate_up[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG
             )  # [1,1,B, 2*intermediate]
 
-            # Split into gate and up halves (split_size = intermediate, produces 2 chunks)
+            # Split into gate and up halves
             gate_out, up_out = ttnn.split(gate_up_out, self.moe_intermediate_size, dim=3)
             ttnn.deallocate(gate_up_out)
 
