@@ -89,6 +89,7 @@ void kernel_main() {
         // delta = (v - kv_mem) * beta
         cb_wait_front(cb_tmp, D_TILES);
         cb_reserve_back(cb_tmp2, D_TILES);
+        binary_op_init_common(cb_v, cb_tmp, cb_tmp2);
         sub_tiles_init(cb_v, cb_tmp);
         for (uint32_t t = 0; t < D_TILES; t++) {
             tile_regs_acquire();
@@ -105,6 +106,7 @@ void kernel_main() {
         // delta *= beta (scalar broadcast)
         cb_wait_front(cb_tmp2, D_TILES);
         cb_reserve_back(cb_tmp, D_TILES);  // reuse cb_tmp for final delta
+        binary_op_init_common(cb_tmp2, cb_beta, cb_tmp);
         mul_tiles_bcast_scalar_init_short(cb_tmp2, cb_beta);
         for (uint32_t t = 0; t < D_TILES; t++) {
             tile_regs_acquire();
@@ -149,13 +151,15 @@ void kernel_main() {
                 tile_regs_commit();
                 tile_regs_wait();
 
-                // Pack update to cb_tmp2 (single tile at a time)
+                // Pack update to cb_tmp2 (single tile scratch)
+                cb_reserve_back(cb_tmp2, 1);
                 pack_tile(0, cb_tmp2);
                 tile_regs_release();
                 cb_push_back(cb_tmp2, 1);
 
                 // Add: state_new[i,j] = state_decayed[i,j] + update[i,j]
                 cb_wait_front(cb_tmp2, 1);
+                binary_op_init_common(cb_sd, cb_tmp2, cb_state_new);
                 add_tiles_init(cb_sd, cb_tmp2);
                 tile_regs_acquire();
                 add_tiles(cb_sd, cb_tmp2, sd_idx, 0, 0);
