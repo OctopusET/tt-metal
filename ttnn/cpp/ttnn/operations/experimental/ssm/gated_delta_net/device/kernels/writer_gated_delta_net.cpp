@@ -21,10 +21,10 @@ void kernel_main() {
     uint32_t num_heads = get_arg_val<uint32_t>(3);
 
     const uint32_t bf16_tile_bytes = get_tile_size(cb_out);
-    const uint32_t fp32_tile_bytes = get_tile_size(cb_state_new);
+    const uint32_t state_tile_bytes = get_tile_size(cb_state_new);  // bf16 now
 
     const auto out_acc = TensorAccessor(out_acc_args, out_addr, bf16_tile_bytes);
-    const auto state_acc = TensorAccessor(state_acc_args, state_addr, fp32_tile_bytes);
+    const auto state_acc = TensorAccessor(state_acc_args, state_addr, state_tile_bytes);
 
     for (uint32_t hh = 0; hh < num_heads; hh++) {
         uint32_t h = head_start + hh;
@@ -34,7 +34,7 @@ void kernel_main() {
         uint32_t state_l1 = get_read_ptr(cb_state_new);
         for (uint32_t t = 0; t < STATE_TILES; t++) {
             noc_async_write_tile(h * STATE_TILES + t, state_acc, state_l1);
-            state_l1 += fp32_tile_bytes;
+            state_l1 += state_tile_bytes;
         }
         noc_async_write_barrier();
         cb_pop_front(cb_state_new, STATE_TILES);
