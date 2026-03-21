@@ -33,14 +33,14 @@ void kernel_main() {
     uint32_t num_heads = get_arg_val<uint32_t>(7);
 
     const uint32_t bf16_tile_bytes = get_tile_size(cb_q);
-    const uint32_t fp32_tile_bytes = get_tile_size(cb_state);
+    const uint32_t state_tile_bytes = get_tile_size(cb_state);  // bf16 now
 
     const auto q_acc = TensorAccessor(q_acc_args, q_addr, bf16_tile_bytes);
     const auto k_acc = TensorAccessor(k_acc_args, k_addr, bf16_tile_bytes);
     const auto v_acc = TensorAccessor(v_acc_args, v_addr, bf16_tile_bytes);
     const auto decay_acc = TensorAccessor(decay_acc_args, decay_addr, bf16_tile_bytes);
     const auto beta_acc = TensorAccessor(beta_acc_args, beta_addr, bf16_tile_bytes);
-    const auto state_acc = TensorAccessor(state_acc_args, state_addr, fp32_tile_bytes);
+    const auto state_acc = TensorAccessor(state_acc_args, state_addr, state_tile_bytes);
 
     for (uint32_t hh = 0; hh < num_heads; hh++) {
         uint32_t h = head_start + hh;

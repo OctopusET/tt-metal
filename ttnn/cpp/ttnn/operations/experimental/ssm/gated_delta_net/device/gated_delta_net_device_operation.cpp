@@ -19,7 +19,7 @@ void GatedDeltaNetDeviceOperation::validate_on_program_cache_miss(
     TT_FATAL(q.storage_type() == StorageType::DEVICE, "Inputs must be on device");
     TT_FATAL(q.layout() == Layout::TILE, "Expected TILE layout");
     TT_FATAL(state.layout() == Layout::TILE, "Expected TILE layout for state");
-    TT_FATAL(state.dtype() == DataType::FLOAT32, "State must be fp32");
+    TT_FATAL(state.dtype() == DataType::FLOAT32 || state.dtype() == DataType::BFLOAT16, "State must be fp32 or bf16");
     TT_FATAL(q.memory_config().memory_layout() == TensorMemoryLayout::INTERLEAVED, "Expected interleaved tensors");
     TT_FATAL(q.padded_shape()[1] == state.padded_shape()[1], "Q and state must have same num_heads");
 }
@@ -37,9 +37,9 @@ GatedDeltaNetDeviceOperation::spec_return_value_t GatedDeltaNetDeviceOperation::
     output_specs.push_back(
         TensorSpec(q.logical_shape(), TensorLayout(DataType::BFLOAT16, PageConfig(Layout::TILE), memory_config)));
 
-    // new_state: same shape as state, fp32
+    // new_state: same shape and dtype as input state
     output_specs.push_back(
-        TensorSpec(state.logical_shape(), TensorLayout(DataType::FLOAT32, PageConfig(Layout::TILE), memory_config)));
+        TensorSpec(state.logical_shape(), TensorLayout(state.dtype(), PageConfig(Layout::TILE), memory_config)));
 
     return output_specs;
 }

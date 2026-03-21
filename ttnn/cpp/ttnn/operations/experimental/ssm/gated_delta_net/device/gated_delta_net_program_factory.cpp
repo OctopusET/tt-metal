@@ -34,9 +34,7 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
 
     // Data formats
     const tt::DataFormat bf16_format = tt::DataFormat::Float16_b;
-    const tt::DataFormat fp32_format = tt::DataFormat::Float32;
     const uint32_t bf16_tile_size = tt::tile_size(bf16_format);
-    const uint32_t fp32_tile_size = tt::tile_size(fp32_format);
 
     // Core mapping: 1 head per core
     auto device = q.device();
@@ -54,30 +52,31 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
         return tt::tt_metal::CreateCircularBuffer(program, all_cores, config);
     };
 
-    // Circular buffers (192 KB total per core)
-    const uint32_t cb_q_id = tt::CBIndex::c_0;
-    const uint32_t cb_k_id = tt::CBIndex::c_1;
-    const uint32_t cb_v_id = tt::CBIndex::c_2;
-    const uint32_t cb_decay_id = tt::CBIndex::c_3;
-    const uint32_t cb_beta_id = tt::CBIndex::c_4;
-    const uint32_t cb_state_id = tt::CBIndex::c_5;
-    const uint32_t cb_state_new_id = tt::CBIndex::c_6;
-    const uint32_t cb_out_id = tt::CBIndex::c_7;
-    const uint32_t cb_kv_mem_id = tt::CBIndex::c_24;
-    const uint32_t cb_delta_id = tt::CBIndex::c_25;
-    const uint32_t cb_k_t_id = tt::CBIndex::c_26;
+    // Circular buffers -- all bf16 (fp32 CBs hang with element-wise ops on Blackhole)
+    // fp32_dest_acc_en provides fp32 accumulation in dest registers
+    const uint32_t cb_q_id = tt::CBIndex::c_0;          // Q vector [D_TILES]
+    const uint32_t cb_k_id = tt::CBIndex::c_1;          // K vector [D_TILES]
+    const uint32_t cb_v_id = tt::CBIndex::c_2;          // V vector [D_TILES]
+    const uint32_t cb_decay_id = tt::CBIndex::c_3;      // decay scalar [1]
+    const uint32_t cb_beta_id = tt::CBIndex::c_4;       // beta scalar [1]
+    const uint32_t cb_state_id = tt::CBIndex::c_5;      // input state [STATE_TILES] (reader->compute)
+    const uint32_t cb_state_new_id = tt::CBIndex::c_6;  // output state [STATE_TILES] (compute->writer)
+    const uint32_t cb_out_id = tt::CBIndex::c_7;        // output vector [D_TILES] (compute->writer)
+    const uint32_t cb_sd_id = tt::CBIndex::c_24;        // decayed state [STATE_TILES] (compute internal)
+    const uint32_t cb_tmp_id = tt::CBIndex::c_25;       // scratch [D_TILES] (kv_mem, delta)
+    const uint32_t cb_tmp2_id = tt::CBIndex::c_26;      // scratch2 [D_TILES]
 
     create_cb(cb_q_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_k_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_v_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_decay_id, 1, bf16_tile_size, bf16_format);
     create_cb(cb_beta_id, 1, bf16_tile_size, bf16_format);
-    create_cb(cb_state_id, STATE_TILES, fp32_tile_size, fp32_format);
-    create_cb(cb_state_new_id, STATE_TILES, fp32_tile_size, fp32_format);
+    create_cb(cb_state_id, STATE_TILES, bf16_tile_size, bf16_format);
+    create_cb(cb_state_new_id, STATE_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_out_id, D_TILES, bf16_tile_size, bf16_format);
-    create_cb(cb_kv_mem_id, D_TILES, bf16_tile_size, bf16_format);
-    create_cb(cb_delta_id, D_TILES, bf16_tile_size, bf16_format);
-    create_cb(cb_k_t_id, D_TILES, bf16_tile_size, bf16_format);
+    create_cb(cb_sd_id, STATE_TILES, bf16_tile_size, bf16_format);  // compute intermediate
+    create_cb(cb_tmp_id, D_TILES, bf16_tile_size, bf16_format);
+    create_cb(cb_tmp2_id, D_TILES, bf16_tile_size, bf16_format);
 
     // Get buffers for TensorAccessorArgs
     auto* q_buffer = tensor_args.q.buffer();
@@ -112,9 +111,9 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
         cb_state_id,
         cb_state_new_id,
         cb_out_id,
-        cb_kv_mem_id,
-        cb_delta_id,
-        cb_k_t_id,
+        cb_sd_id,
+        cb_tmp_id,
+        cb_tmp2_id,
         D_TILES,
         STATE_TILES};
 
