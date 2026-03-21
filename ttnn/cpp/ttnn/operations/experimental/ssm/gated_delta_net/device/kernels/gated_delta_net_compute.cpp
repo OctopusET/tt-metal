@@ -19,6 +19,7 @@
 #include "api/compute/tile_move_copy.h"
 #include "api/compute/bcast.h"
 #include "api/compute/matmul.h"
+#include "api/compute/transpose_wh.h"
 
 constexpr uint32_t cb_q = get_compile_time_arg_val(0);
 constexpr uint32_t cb_k = get_compile_time_arg_val(1);
@@ -124,60 +125,52 @@ void kernel_main() {
         // Phase 3: state_new = state_decayed + k^T @ delta
         //          output = q @ state_new
         //
-        // For each state tile [i,j]:
-        //   update[i,j] = k_tile[i]^T @ delta_tile[j]  (matmul with transpose)
-        //   state_new[i,j] = state_decayed[i,j] + update[i,j]
-        //
-        // cb_sd still has state_decayed (not popped yet).
-        // cb_tmp has delta.
+        // Step 1: Transpose k tiles within each tile (row0 -> col0)
+        // Step 2: For each (i,j): update = k_t[i] @ delta[j], state_new = sd + update
         // ============================================================
         cb_wait_front(cb_tmp, D_TILES);  // delta
 
-        cb_reserve_back(cb_state_new, STATE_TILES);
+        // Transpose k tiles: row-oriented -> column-oriented within each tile
+        cb_reserve_back(cb_tmp2, D_TILES);
+        transpose_wh_init(cb_k, cb_tmp2);
+        for (uint32_t t = 0; t < D_TILES; t++) {
+            tile_regs_acquire();
+            transpose_wh_tile(cb_k, t, 0);
+            tile_regs_commit();
+            tile_regs_wait();
+            pack_tile(0, cb_tmp2);
+            tile_regs_release();
+        }
+        cb_push_back(cb_tmp2, D_TILES);  // cb_tmp2 has k_transposed
+        cb_wait_front(cb_tmp2, D_TILES);
 
-        // For the outer product k^T @ delta, we use matmul with transpose=1
-        // which transposes the FIRST operand (in0).
-        // matmul_tiles(cb_k, cb_tmp, k_tile_i, delta_tile_j, dst)
-        // with mm_init transpose=1: transposes k_tile before multiply
-        mm_init(cb_k, cb_tmp, cb_state_new, /*transpose=*/1);
+        // Compute state_new[i,j] = sd[i,j] + k_t[i] @ delta[j]
+        cb_reserve_back(cb_state_new, STATE_TILES);
 
         for (uint32_t i = 0; i < D_TILES; i++) {
             for (uint32_t j = 0; j < D_TILES; j++) {
                 uint32_t sd_idx = i * D_TILES + j;
 
-                // Compute update tile: k_tile[i]^T @ delta_tile[j]
+                // Outer product tile: k_t_tile[i] @ delta_tile[j]
+                mm_init(cb_tmp2, cb_tmp, cb_state_new);
                 tile_regs_acquire();
-                matmul_tiles(cb_k, cb_tmp, i, j, 0);
+                matmul_tiles(cb_tmp2, cb_tmp, i, j, 0);
                 tile_regs_commit();
                 tile_regs_wait();
 
-                // Pack update to cb_tmp2 (single tile scratch)
-                cb_reserve_back(cb_tmp2, 1);
-                pack_tile(0, cb_tmp2);
-                tile_regs_release();
-                cb_push_back(cb_tmp2, 1);
+                // Add state_decayed: state_new[i,j] = dst[0] + sd[i,j]
+                // Use binary_dest_reuse: dst[0] += cb_sd[sd_idx]
+                binary_dest_reuse_tiles_init(cb_sd);
+                binary_dest_reuse_tiles(cb_sd, sd_idx, 0);
 
-                // Add: state_new[i,j] = state_decayed[i,j] + update[i,j]
-                cb_wait_front(cb_tmp2, 1);
-                binary_op_init_common(cb_sd, cb_tmp2, cb_state_new);
-                add_tiles_init(cb_sd, cb_tmp2);
-                tile_regs_acquire();
-                add_tiles(cb_sd, cb_tmp2, sd_idx, 0, 0);
-                tile_regs_commit();
-                tile_regs_wait();
                 pack_tile(0, cb_state_new);
                 tile_regs_release();
-                cb_pop_front(cb_tmp2, 1);
-
-                // Re-init matmul for next iteration
-                if (i < D_TILES - 1 || j < D_TILES - 1) {
-                    mm_init(cb_k, cb_tmp, cb_state_new, /*transpose=*/1);
-                }
             }
         }
         cb_push_back(cb_state_new, STATE_TILES);
         cb_pop_front(cb_sd, STATE_TILES);  // done with decayed state
         cb_pop_front(cb_tmp, D_TILES);     // done with delta
+        cb_pop_front(cb_tmp2, D_TILES);    // done with k_transposed
 
         // Output: q @ state_new
         cb_wait_front(cb_state_new, STATE_TILES);
