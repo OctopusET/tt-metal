@@ -175,8 +175,13 @@ class GatedDeltaNet(LightweightModule):
     # State management
     # =========================================================================
     def initialize_states(self, batch_size=1):
-        """Initialize host-side recurrent state and conv buffer."""
-        self._host_state = torch.zeros(self.num_v_heads, self.head_k_dim, self.head_v_dim)
+        """Initialize device-side fp32 state and host-side conv buffer."""
+        self._device_state = ttnn.from_torch(
+            torch.zeros(1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+            dtype=ttnn.float32,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.mesh_device,
+        )
         self._conv_state = torch.zeros(self.conv_kernel_size, self.conv_dim)
 
     # =========================================================================
@@ -233,14 +238,54 @@ class GatedDeltaNet(LightweightModule):
         beta = b_h.sigmoid()
         decay = (-self._A_exp * F.softplus(a_h + self._dt_bias)).exp()
 
-        # Recurrence (float32, state on host, bmm for speed)
-        self._host_state *= decay.unsqueeze(-1).unsqueeze(-1)
-        kv_mem = torch.bmm(k_h.unsqueeze(1), self._host_state).squeeze(1)  # (H, V)
+        # Recurrence: compute kv_mem + delta on host, kernel does decay + outer product + output
+        # Read state from device for kv_mem computation
+        state_cpu = ttnn.to_torch(self._device_state).float()  # [1, H, D, D]
+        state_h = state_cpu[0]  # [H, D, D]
+        state_decayed_h = state_h * decay.unsqueeze(-1).unsqueeze(-1)
+        kv_mem = torch.bmm(k_h.unsqueeze(1), state_decayed_h).squeeze(1)
         delta = (v_h - kv_mem) * beta.unsqueeze(-1)
-        self._host_state += torch.bmm(k_h.unsqueeze(2), delta.unsqueeze(1))  # rank-1 update
-        output_h = torch.bmm(q_h.unsqueeze(1), self._host_state).squeeze(1)  # (H, V)
 
-        # Gated RMSNorm + head merge (host)
+        # Send q, k_col, delta, decay to device for fused kernel
+        q_tt = ttnn.from_torch(
+            q_h.reshape(1, self.num_v_heads, 1, self.head_k_dim),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.mesh_device,
+        )
+        k_col_tt = ttnn.from_torch(
+            k_h.reshape(1, self.num_v_heads, self.head_k_dim, 1),  # COLUMN vector!
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.mesh_device,
+        )
+        delta_tt = ttnn.from_torch(
+            delta.reshape(1, self.num_v_heads, 1, self.head_v_dim),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.mesh_device,
+        )
+        decay_tt = ttnn.from_torch(
+            decay.reshape(1, self.num_v_heads, 1, 1),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.mesh_device,
+        )
+        dummy = ttnn.from_torch(
+            torch.ones(1, self.num_v_heads, 1, 1),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.mesh_device,
+        )
+
+        # Fused kernel: state*decay + k_col@delta, output = q @ state_new
+        output_tt, self._device_state = ttnn.experimental.gated_delta_net(
+            q_tt, k_col_tt, delta_tt, decay_tt, dummy, self._device_state
+        )
+
+        # Gated RMSNorm on host
+        output_h = ttnn.to_torch(output_tt).float()[0, :, 0, : self.head_v_dim]
+        ttnn.deallocate(output_tt)
         z_heads = z_h.reshape(self.num_v_heads, self.head_v_dim)
         variance = output_h.pow(2).mean(-1, keepdim=True)
         output_normed = output_h * torch.rsqrt(variance + self.args.norm_eps)
@@ -248,9 +293,7 @@ class GatedDeltaNet(LightweightModule):
         output_gated = output_normed * F.silu(z_heads)
         output_flat = output_gated.reshape(1, self.value_dim)
 
-        # =================================================================
-        # 9. Output projection  [on device]
-        # =================================================================
+        # Output projection on device
         out_pad = torch.zeros(1, 1, B_pad, self.value_dim)
         out_pad[0, 0, 0, :] = output_flat
         output = ttnn.from_torch(
@@ -262,4 +305,4 @@ class GatedDeltaNet(LightweightModule):
         )
         output = ttnn.linear(output, self.out_proj, compute_kernel_config=self.proj_compute_config)
 
-        return output  # (1, 1, B_pad, hidden_size)
+        return output
