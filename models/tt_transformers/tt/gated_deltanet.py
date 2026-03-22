@@ -103,10 +103,10 @@ class GatedDeltaNet(LightweightModule):
 
     def initialize_states(self, batch_size=1):
         """Initialize device-side recurrent state and host-side conv buffer."""
-        # State on DEVICE (bf16) -- stays on device between tokens
+        # State on DEVICE (fp32 for precision) -- stays on device between tokens
         self._device_state = ttnn.from_torch(
             torch.zeros(1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.float32,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
         )
@@ -184,10 +184,11 @@ class GatedDeltaNet(LightweightModule):
             device=self.mesh_device,
         )
 
-        # 7. Device: fused recurrence kernel (1 kernel launch, state stays on device)
-        output_tt, self._device_state = ttnn.experimental.gated_delta_net(
-            q_tt, k_tt, v_tt, decay_tt, beta_tt, self._device_state
-        )
+        # 7. Device: fused recurrence kernel (1 kernel launch)
+        # Convert fp32 state to bf16 for kernel, convert result back to fp32
+        state_bf16 = ttnn.typecast(self._device_state, ttnn.bfloat16)
+        output_tt, new_state_bf16 = ttnn.experimental.gated_delta_net(q_tt, k_tt, v_tt, decay_tt, beta_tt, state_bf16)
+        self._device_state = ttnn.typecast(new_state_bf16, ttnn.float32)
 
         # 8. Sync: get recurrence output for gated RMSNorm on host
         output_h = ttnn.to_torch(output_tt).float()[0, :, 0, : self.head_v_dim]  # [H, D]
