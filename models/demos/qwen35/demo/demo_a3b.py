@@ -134,18 +134,23 @@ def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=2
     generated = list(prompt_ids)
     B = args.tile_padded_batch_rows
 
+    # Pre-allocate reusable tensors (avoid allocation per step)
+    x_pad = torch.zeros(1, 1, B, args.dim)
+    pos_tensor = torch.tensor([0], dtype=torch.int32)
+    rot_idx_tensor = torch.tensor([[0]], dtype=torch.int64)
+
     total_steps = min(len(prompt_ids) + max_tokens, args.max_seq_len)
     for step in range(total_steps):
         tok = prompt_ids[step] if step < len(prompt_ids) else generated[-1]
 
-        # Embedding on CPU
-        emb_vec = emb_weight_cpu[tok].unsqueeze(0)
-        x_pad = torch.zeros(1, 1, B, args.dim)
-        x_pad[0, 0, 0, :] = emb_vec
+        # Embedding on CPU (reuse pre-allocated buffer)
+        x_pad[0, 0, 0, :] = emb_weight_cpu[tok]
         x = ttnn.from_torch(x_pad, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
 
-        tt_pos = ttnn.from_torch(torch.tensor([step], dtype=torch.int32), dtype=ttnn.int32, device=device)
-        rot_idxs = ttnn.from_torch(torch.tensor([[step]], dtype=torch.int64), device=device)
+        pos_tensor[0] = step
+        tt_pos = ttnn.from_torch(pos_tensor, dtype=ttnn.int32, device=device)
+        rot_idx_tensor[0, 0] = step
+        rot_idxs = ttnn.from_torch(rot_idx_tensor, device=device)
         rot_mats = model.rope_setup.get_rot_mats(rot_idxs)
 
         for layer in model.layers:

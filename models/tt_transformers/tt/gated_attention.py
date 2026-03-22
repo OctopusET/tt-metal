@@ -87,6 +87,8 @@ class GatedAttention(Attention):
             self.pre_wo_hook = self._apply_gate
 
         # Install custom RoPE for partial rotation (rotary_dim < head_dim)
+        # TODO: replace with device-side RoPE using corrected cos/sin matrices
+        # to eliminate 5 host-device syncs per attention layer
         partial_factor = getattr(configuration, "partial_rotary_factor", 1.0)
         if partial_factor < 1.0:
             self._setup_partial_rope(configuration)
