@@ -62,21 +62,28 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
     const uint32_t cb_state_id = tt::CBIndex::c_5;      // input state [STATE_TILES] (reader->compute)
     const uint32_t cb_state_new_id = tt::CBIndex::c_6;  // output state [STATE_TILES] (compute->writer)
     const uint32_t cb_out_id = tt::CBIndex::c_7;        // output vector [D_TILES] (compute->writer)
-    const uint32_t cb_sd_id = tt::CBIndex::c_24;        // decayed state [STATE_TILES] (compute internal)
-    const uint32_t cb_tmp_id = tt::CBIndex::c_25;       // scratch [D_TILES] (kv_mem, delta)
+    const uint32_t cb_sd_id = tt::CBIndex::c_24;        // bf16 state for fp32->bf16 conversion
+    const uint32_t cb_tmp_id = tt::CBIndex::c_25;       // scratch [D_TILES]
     const uint32_t cb_tmp2_id = tt::CBIndex::c_26;      // scratch2 [D_TILES]
+    const uint32_t cb_sd2_id = tt::CBIndex::c_27;       // bf16 decayed state for add in Phase 3
+
+    // State CBs: fp32 for precision. matmul_tiles works with fp32 CBs.
+    // Element-wise ops use bf16 intermediates (cb_sd, cb_sd2).
+    const tt::DataFormat fp32_format = tt::DataFormat::Float32;
+    const uint32_t fp32_tile_size = tt::tile_size(fp32_format);
 
     create_cb(cb_q_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_k_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_v_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_decay_id, 1, bf16_tile_size, bf16_format);
     create_cb(cb_beta_id, 1, bf16_tile_size, bf16_format);
-    create_cb(cb_state_id, STATE_TILES, bf16_tile_size, bf16_format);
-    create_cb(cb_state_new_id, STATE_TILES, bf16_tile_size, bf16_format);
+    create_cb(cb_state_id, STATE_TILES, fp32_tile_size, fp32_format);      // fp32 input state
+    create_cb(cb_state_new_id, STATE_TILES, fp32_tile_size, fp32_format);  // fp32 output state
     create_cb(cb_out_id, D_TILES, bf16_tile_size, bf16_format);
-    create_cb(cb_sd_id, STATE_TILES, bf16_tile_size, bf16_format);  // compute intermediate
+    create_cb(cb_sd_id, STATE_TILES, bf16_tile_size, bf16_format);  // bf16 conversion temp
     create_cb(cb_tmp_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_tmp2_id, D_TILES, bf16_tile_size, bf16_format);
+    create_cb(cb_sd2_id, STATE_TILES, bf16_tile_size, bf16_format);  // bf16 decayed for add
 
     // Get buffers for TensorAccessorArgs
     auto* q_buffer = tensor_args.q.buffer();
@@ -114,6 +121,7 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
         cb_sd_id,
         cb_tmp_id,
         cb_tmp2_id,
+        cb_sd2_id,
         D_TILES,
         STATE_TILES};
 
