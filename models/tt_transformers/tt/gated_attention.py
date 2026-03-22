@@ -86,12 +86,10 @@ class GatedAttention(Attention):
         if self.gate_weight is not None:
             self.pre_wo_hook = self._apply_gate
 
-        # Install custom RoPE for partial rotation (rotary_dim < head_dim)
-        # TODO: replace with device-side RoPE using corrected cos/sin matrices
-        # to eliminate 5 host-device syncs per attention layer
-        partial_factor = getattr(configuration, "partial_rotary_factor", 1.0)
-        if partial_factor < 1.0:
-            self._setup_partial_rope(configuration)
+        # Partial rotation handled by corrected cos/sin in build_model():
+        # frequencies recomputed with 1/theta^(2i/rotary_dim) instead of 1/theta^(2i/head_dim).
+        # Standard device RoPE path applies rotation to all dims; non-rotary dims get cos=1/sin=0.
+        # Eliminates 5 host-device syncs per attention layer.
 
     def _setup_partial_rope(self, args):
         """Set up host-based partial RoPE for Qwen3.5.

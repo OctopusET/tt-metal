@@ -31,7 +31,7 @@ from models.tt_transformers.tt.gated_attention import GatedAttention
 from models.tt_transformers.tt.model_config import ModelArgs
 from models.tt_transformers.tt.qwen35_decoder import DeltaNetDecoderBlock
 from models.tt_transformers.tt.qwen35_moe import Qwen35MoE
-from models.tt_transformers.tt.rope import RotarySetup
+from models.tt_transformers.tt.rope import HfRotarySetup
 
 
 def build_model(device, args, sd):
@@ -53,22 +53,46 @@ def build_model(device, args, sd):
     wcp = args.weight_cache_path(dtype=ttnn.bfloat8_b)
 
     # RoPE with partial rotation (64/256 dims)
-    model.rope_setup = RotarySetup(
+    # HfRotarySetup for HF-style RoPE (use_hf_rope=True for Qwen3.5).
+    # Returns full cos/sin cache; ttnn.experimental.rotary_embedding slices by position.
+    model.rope_setup = HfRotarySetup(
         device=device,
         batch_size=args.max_batch_size,
         head_dim=args.head_dim,
         max_seq_len=args.max_seq_len,
         rope_theta=args.rope_theta,
         rope_scaling=args.rope_scaling,
-        use_qk_fused=args.use_qk_fused,
     )
     partial = getattr(args, "partial_rotary_factor", 1.0)
     if partial < 1.0:
-        rotary_dim = int(args.head_dim * partial)
+        # Fix cos/sin for partial rotation with correct frequencies.
+        # HfRotarySetup computes 1/theta^(2i/head_dim) for head_dim=256.
+        # Qwen3.5 needs 1/theta^(2i/rotary_dim) for rotary_dim=64.
+        # HF format: cos/sin [1, 1, seq_len, head_dim] where dims are paired
+        # as (d, d+head_dim//2) -- first half and second half are duplicated.
+        rotary_dim = int(args.head_dim * partial)  # 64
+        half_rotary = rotary_dim // 2  # 32
+        half_head = args.head_dim // 2  # 128
+
+        inv_freq_correct = 1.0 / (args.rope_theta ** (torch.arange(0, rotary_dim, 2).float() / rotary_dim))
+        positions = torch.arange(args.max_seq_len).float()
+        freqs = torch.outer(positions, inv_freq_correct)  # [seq_len, 32]
+
         cos_h = ttnn.to_torch(model.rope_setup.cos_matrix)
         sin_h = ttnn.to_torch(model.rope_setup.sin_matrix)
-        cos_h[:, :, :, rotary_dim:] = 1.0
-        sin_h[:, :, :, rotary_dim:] = 0.0
+
+        # HF format: first half_head dims duplicate second half_head dims.
+        # Pairs: (dim j, dim j+half_head). Replace first half_rotary pairs with correct freqs.
+        cos_h[:, :, :, :half_rotary] = freqs.cos().unsqueeze(0).unsqueeze(0)
+        cos_h[:, :, :, half_head : half_head + half_rotary] = freqs.cos().unsqueeze(0).unsqueeze(0)
+        sin_h[:, :, :, :half_rotary] = freqs.sin().unsqueeze(0).unsqueeze(0)
+        sin_h[:, :, :, half_head : half_head + half_rotary] = freqs.sin().unsqueeze(0).unsqueeze(0)
+        # Non-rotary dims: cos=1, sin=0
+        cos_h[:, :, :, half_rotary:half_head] = 1.0
+        cos_h[:, :, :, half_head + half_rotary :] = 1.0
+        sin_h[:, :, :, half_rotary:half_head] = 0.0
+        sin_h[:, :, :, half_head + half_rotary :] = 0.0
+
         ttnn.deallocate(model.rope_setup.cos_matrix)
         ttnn.deallocate(model.rope_setup.sin_matrix)
         model.rope_setup.cos_matrix = ttnn.from_torch(
