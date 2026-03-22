@@ -175,13 +175,15 @@ class GatedDeltaNet(LightweightModule):
     # State management
     # =========================================================================
     def initialize_states(self, batch_size=1):
-        """Initialize device-side fp32 state and host-side conv buffer."""
+        """Initialize device fp32 state, host shadow, and conv buffer."""
         self._device_state = ttnn.from_torch(
             torch.zeros(1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
             dtype=ttnn.float32,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
         )
+        # Host shadow for kv_mem computation (avoids reading state from device)
+        self._host_state = torch.zeros(self.num_v_heads, self.head_k_dim, self.head_v_dim)
         self._conv_state = torch.zeros(self.conv_kernel_size, self.conv_dim)
 
     # =========================================================================
@@ -238,15 +240,12 @@ class GatedDeltaNet(LightweightModule):
         beta = b_h.sigmoid()
         decay = (-self._A_exp * F.softplus(a_h + self._dt_bias)).exp()
 
-        # Recurrence: compute kv_mem + delta on host, kernel does decay + outer product + output
-        # Read state from device for kv_mem computation
-        state_cpu = ttnn.to_torch(self._device_state).float()  # [1, H, D, D]
-        state_h = state_cpu[0]  # [H, D, D]
-        state_decayed_h = state_h * decay.unsqueeze(-1).unsqueeze(-1)
+        # Recurrence: kv_mem from host shadow (no device read sync!)
+        state_decayed_h = self._host_state * decay.unsqueeze(-1).unsqueeze(-1)
         kv_mem = torch.bmm(k_h.unsqueeze(1), state_decayed_h).squeeze(1)
         delta = (v_h - kv_mem) * beta.unsqueeze(-1)
 
-        # Send q, k_col, delta, decay to device for fused kernel
+        # Send q, k_col, delta, decay to device
         q_tt = ttnn.from_torch(
             q_h.reshape(1, self.num_v_heads, 1, self.head_k_dim),
             dtype=ttnn.bfloat16,
@@ -254,7 +253,7 @@ class GatedDeltaNet(LightweightModule):
             device=self.mesh_device,
         )
         k_col_tt = ttnn.from_torch(
-            k_h.reshape(1, self.num_v_heads, self.head_k_dim, 1),  # COLUMN vector!
+            k_h.reshape(1, self.num_v_heads, self.head_k_dim, 1),
             dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
@@ -283,9 +282,11 @@ class GatedDeltaNet(LightweightModule):
             q_tt, k_col_tt, delta_tt, decay_tt, dummy, self._device_state
         )
 
-        # Gated RMSNorm on host
+        # Sync: read output only. Update host shadow without extra sync.
         output_h = ttnn.to_torch(output_tt).float()[0, :, 0, : self.head_v_dim]
         ttnn.deallocate(output_tt)
+        # Update host shadow: apply same decay + update as kernel did
+        self._host_state = state_decayed_h + torch.bmm(k_h.unsqueeze(2), delta.unsqueeze(1))
         z_heads = z_h.reshape(self.num_v_heads, self.head_v_dim)
         variance = output_h.pow(2).mean(-1, keepdim=True)
         output_normed = output_h * torch.rsqrt(variance + self.args.norm_eps)
