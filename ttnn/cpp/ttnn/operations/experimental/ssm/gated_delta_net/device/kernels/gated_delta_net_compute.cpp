@@ -2,20 +2,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// GatedDeltaNet recurrence: fp32 state, k as column vector.
+// GatedDeltaNet recurrence: fp32 state, k_col outer product.
 //
-// Inputs:
-//   q:     [1, H, 1, D]  bf16 - query (row vector)
-//   k:     [1, H, D, 1]  bf16 - key as COLUMN vector (data in col 0)
-//   v:     [1, H, 1, D]  bf16 - pre-computed delta from host
-//   decay: [1, H, 1, 1]  bf16 - decay scalar
-//   beta:  [1, H, 1, 1]  bf16 - unused
-//   state: [1, H, D, D]  fp32 - recurrent state
+// CB ownership:
+//   cb_state:     compute-internal (reused after reader pops)
+//   cb_state_new: compute→writer (pushed ONCE, never popped by compute)
+//   cb_sd/cb_sd2: compute-internal
 //
-// Kernel:
-//   1. state_decayed = state * decay
-//   2. state_new = state_decayed + k_col @ delta (outer product)
-//   3. output = q @ state_new
+// Inputs: q[1,H,1,D], k_col[1,H,D,1], delta[1,H,1,D], decay[1,H,1,1]
 
 #include <cstdint>
 
@@ -52,7 +46,9 @@ void kernel_main() {
         cb_wait_front(cb_beta, 1);
         cb_wait_front(cb_state, STATE_TILES);
 
-        // Phase 1: fp32 state -> bf16, decay, dual-pack to fp32 + bf16
+        // ============================================================
+        // Phase 1a: fp32 state → bf16 cb_sd
+        // ============================================================
         cb_reserve_back(cb_sd, STATE_TILES);
         init_sfpu(cb_state, cb_sd);
         for (uint32_t t = 0; t < STATE_TILES; t++) {
@@ -64,44 +60,40 @@ void kernel_main() {
             tile_regs_release();
         }
         cb_push_back(cb_sd, STATE_TILES);
-        cb_pop_front(cb_state, STATE_TILES);
+        cb_pop_front(cb_state, STATE_TILES);  // cb_state now FREE for reuse
 
+        // ============================================================
+        // Phase 1b: decay, dual pack → cb_state(fp32 internal) + cb_sd2(bf16)
+        // ============================================================
         cb_wait_front(cb_sd, STATE_TILES);
-        cb_reserve_back(cb_state_new, STATE_TILES);
+        cb_reserve_back(cb_state, STATE_TILES);  // REUSE as internal
         cb_reserve_back(cb_sd2, STATE_TILES);
-        binary_op_init_common(cb_sd, cb_decay, cb_state_new);
+        binary_op_init_common(cb_sd, cb_decay, cb_state);  // packer for fp32
         mul_tiles_bcast_scalar_init_short(cb_sd, cb_decay);
         for (uint32_t t = 0; t < STATE_TILES; t++) {
             tile_regs_acquire();
             mul_tiles_bcast_scalar(cb_sd, cb_decay, t, 0, 0);
             tile_regs_commit();
             tile_regs_wait();
-            pack_tile(0, cb_state_new);
+            pack_tile(0, cb_state);  // fp32
             pack_reconfig_data_format(cb_sd2);
-            pack_tile(0, cb_sd2);
-            pack_reconfig_data_format(cb_state_new);
+            pack_tile(0, cb_sd2);  // bf16
+            pack_reconfig_data_format(cb_state);
             tile_regs_release();
         }
-        cb_push_back(cb_state_new, STATE_TILES);
-        cb_push_back(cb_sd2, STATE_TILES);
+        cb_push_back(cb_state, STATE_TILES);  // fp32 decayed (internal)
+        cb_push_back(cb_sd2, STATE_TILES);    // bf16 decayed (for add)
         cb_pop_front(cb_sd, STATE_TILES);
         cb_pop_front(cb_decay, 1);
 
-        // Phase 2: state_new += k_col @ delta (outer product)
-        // k_col [D,1]: data in column 0. delta [1,D]: data in row 0.
-        // matmul(k_col_tile[i], delta_tile[j]):
-        //   C[h,w] = sum_m k_col[h,m]*delta[m,w] = k[h]*delta[w] ✓
-        cb_wait_front(cb_sd2, STATE_TILES);
-        cb_pop_front(cb_state_new, STATE_TILES);
-        cb_reserve_back(cb_state_new, STATE_TILES);
-
-        // Pack outer product to bf16 cb_sd (NOT fp32 cb_state_new, which hangs with mm_init)
-        cb_reserve_back(cb_sd, STATE_TILES);
-        mm_init(cb_k, cb_v, cb_sd);  // bf16 output works
+        // ============================================================
+        // Phase 2: outer product k_col @ delta → bf16 cb_sd
+        // k_col[D,1] col0 data × delta[1,D] row0 data → [D,D] full tile
+        // ============================================================
+        cb_reserve_back(cb_sd, STATE_TILES);  // reuse cb_sd
+        mm_init(cb_k, cb_v, cb_sd);           // bf16 inputs, bf16 output
         for (uint32_t i = 0; i < D_TILES; i++) {
             for (uint32_t j = 0; j < D_TILES; j++) {
-                uint32_t sd_idx = i * D_TILES + j;
-
                 tile_regs_acquire();
                 matmul_tiles(cb_k, cb_v, i, j, 0);
                 tile_regs_commit();
@@ -111,31 +103,45 @@ void kernel_main() {
             }
         }
         cb_push_back(cb_sd, STATE_TILES);
-        // Now add: state_new = decayed_state (cb_sd2) + outer_product (cb_sd)
-        // Both are bf16. Pack result to fp32 cb_state_new.
+
+        // ============================================================
+        // Phase 3: state_updated = decayed + outer_product
+        // cb_sd2(bf16 decayed) + cb_sd(bf16 outer) → fp32 DST → dual pack
+        // → cb_state(fp32 internal, overwrite decayed) + cb_state_new(fp32 output)
+        // ============================================================
         cb_wait_front(cb_sd, STATE_TILES);
-        binary_op_init_common(cb_sd2, cb_sd, cb_state_new);
+        cb_wait_front(cb_sd2, STATE_TILES);
+        cb_pop_front(cb_state, STATE_TILES);         // free decayed state
+        cb_reserve_back(cb_state, STATE_TILES);      // for updated internal
+        cb_reserve_back(cb_state_new, STATE_TILES);  // for writer output
+
+        binary_op_init_common(cb_sd2, cb_sd, cb_state);  // packer for fp32
         add_tiles_init(cb_sd2, cb_sd);
         for (uint32_t t = 0; t < STATE_TILES; t++) {
             tile_regs_acquire();
-            add_tiles(cb_sd2, cb_sd, t, t, 0);  // bf16+bf16 -> fp32 DST
+            add_tiles(cb_sd2, cb_sd, t, t, 0);  // bf16+bf16 → fp32 DST
             tile_regs_commit();
             tile_regs_wait();
-            pack_tile(0, cb_state_new);  // fp32 DST -> fp32 CB
+            pack_tile(0, cb_state);      // fp32 internal (for output matmul)
+            pack_tile(0, cb_state_new);  // fp32 output (for writer) -- SAME format, no reconfig
             tile_regs_release();
         }
-        cb_push_back(cb_state_new, STATE_TILES);
+        cb_push_back(cb_state, STATE_TILES);
+        cb_push_back(cb_state_new, STATE_TILES);  // writer's ONLY source, pushed ONCE
         cb_pop_front(cb_sd, STATE_TILES);
         cb_pop_front(cb_sd2, STATE_TILES);
 
-        // Phase 3: output = q @ state_new[fp32]
-        cb_wait_front(cb_state_new, STATE_TILES);
+        // ============================================================
+        // Phase 4: output = q @ state_updated[fp32]
+        // Read from cb_state (internal), NOT cb_state_new (writer's)
+        // ============================================================
+        cb_wait_front(cb_state, STATE_TILES);
         cb_reserve_back(cb_out, D_TILES);
-        mm_init(cb_q, cb_state_new, cb_out);
+        mm_init(cb_q, cb_state, cb_out);
         for (uint32_t j = 0; j < D_TILES; j++) {
             tile_regs_acquire();
             for (uint32_t i = 0; i < D_TILES; i++) {
-                matmul_tiles(cb_q, cb_state_new, i, i * D_TILES + j, 0);
+                matmul_tiles(cb_q, cb_state, i, i * D_TILES + j, 0);
             }
             tile_regs_commit();
             tile_regs_wait();
@@ -143,6 +149,7 @@ void kernel_main() {
             tile_regs_release();
         }
         cb_push_back(cb_out, D_TILES);
+        cb_pop_front(cb_state, STATE_TILES);
 
         cb_pop_front(cb_q, D_TILES);
         cb_pop_front(cb_k, D_TILES);
