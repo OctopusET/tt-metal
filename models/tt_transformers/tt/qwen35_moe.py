@@ -62,27 +62,38 @@ class Qwen35MoE(LightweightModule):
         # Router weight on host (small: [256, 2048])
         self.router_weight = state_dict[f"{prefix}.gate.weight"].float()  # [num_experts, hidden_size]
 
-        # Packed expert weights: gate_up_proj [256, 1024, 2048], down_proj [256, 2048, 512]
-        # Store each expert's weights individually on device for selective computation.
-        raw_gate_up = state_dict[f"{prefix}.experts.gate_up_proj"]  # [256, 2*moe_intermediate, hidden]
-        raw_down = state_dict[f"{prefix}.experts.down_proj"]  # [256, hidden, moe_intermediate]
+        # Expert weights: split gate and up (avoids ttnn.split per expert forward)
+        raw_gate_up = state_dict[f"{prefix}.experts.gate_up_proj"]  # [256, 2*intermediate, hidden]
+        raw_down = state_dict[f"{prefix}.experts.down_proj"]  # [256, hidden, intermediate]
+        intermediate = self.moe_intermediate_size
 
-        self.expert_gate_up = []
+        self.expert_gate = []
+        self.expert_up = []
         self.expert_down = []
         for e in range(self.num_experts):
-            # gate_up: [2*intermediate, hidden] -> transposed [hidden, 2*intermediate] -> [1,1,H,W]
-            gu = raw_gate_up[e].T.unsqueeze(0).unsqueeze(0).contiguous()
-            self.expert_gate_up.append(
+            # Split gate_up into separate gate [intermediate, hidden] and up [intermediate, hidden]
+            gate = raw_gate_up[e, :intermediate, :].T.unsqueeze(0).unsqueeze(0).contiguous()
+            up = raw_gate_up[e, intermediate:, :].T.unsqueeze(0).unsqueeze(0).contiguous()
+            self.expert_gate.append(
                 ttnn.as_tensor(
-                    gu,
+                    gate,
                     dtype=expert_dtype,
                     device=mesh_device,
                     layout=ttnn.TILE_LAYOUT,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    cache_file_name=cache_name(f"experts.{e}.gate_up"),
+                    cache_file_name=cache_name(f"experts.{e}.gate"),
                 )
             )
-            # down: [hidden, intermediate] -> transposed [intermediate, hidden] -> [1,1,H,W]
+            self.expert_up.append(
+                ttnn.as_tensor(
+                    up,
+                    dtype=expert_dtype,
+                    device=mesh_device,
+                    layout=ttnn.TILE_LAYOUT,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    cache_file_name=cache_name(f"experts.{e}.up"),
+                )
+            )
             dn = raw_down[e].T.unsqueeze(0).unsqueeze(0).contiguous()
             self.expert_down.append(
                 ttnn.as_tensor(
@@ -155,23 +166,15 @@ class Qwen35MoE(LightweightModule):
             eid = topk_ids[i].item()
             w = weights[i].item()
 
-            # Expert SwiGLU: silu(x @ gate) * (x @ up), fused as single gate_up matmul then split
-            gate_up_out = ttnn.linear(
-                x, self.expert_gate_up[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG
-            )  # [1,1,B, 2*intermediate]
-
-            # Split into gate and up halves
-            gate_out, up_out = ttnn.split(gate_up_out, self.moe_intermediate_size, dim=3)
-            ttnn.deallocate(gate_up_out)
-
+            # Expert SwiGLU: silu(x @ gate) * (x @ up) -- separate matmuls, no split
+            gate_out = ttnn.linear(x, self.expert_gate[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            up_out = ttnn.linear(x, self.expert_up[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG)
             hidden = ttnn.mul(
                 gate_out,
                 up_out,
                 input_tensor_a_activations=[ttnn.UnaryOpType.SILU],
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
-            ttnn.deallocate(gate_out)
-            ttnn.deallocate(up_out)
 
             expert_out = ttnn.linear(hidden, self.expert_down[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG)
             ttnn.deallocate(hidden)
