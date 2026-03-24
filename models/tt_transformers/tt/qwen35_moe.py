@@ -70,36 +70,23 @@ class Qwen35MoE(LightweightModule):
             cache_file_name=cache_name("gate"),
         )
 
-        # Expert weights: split gate and up (avoids ttnn.split per expert forward)
+        # Expert weights: fused gate+up (1 matmul + split instead of 2 matmuls)
         raw_gate_up = state_dict[f"{prefix}.experts.gate_up_proj"]  # [256, 2*intermediate, hidden]
         raw_down = state_dict[f"{prefix}.experts.down_proj"]  # [256, hidden, intermediate]
         intermediate = self.moe_intermediate_size
 
-        self.expert_gate = []
-        self.expert_up = []
+        self.expert_gate_up = []
         self.expert_down = []
         for e in range(self.num_experts):
-            # Split gate_up into separate gate [intermediate, hidden] and up [intermediate, hidden]
-            gate = raw_gate_up[e, :intermediate, :].T.unsqueeze(0).unsqueeze(0).contiguous()
-            up = raw_gate_up[e, intermediate:, :].T.unsqueeze(0).unsqueeze(0).contiguous()
-            self.expert_gate.append(
+            gu = raw_gate_up[e].T.unsqueeze(0).unsqueeze(0).contiguous()  # [1,1,hidden,2*intermediate]
+            self.expert_gate_up.append(
                 ttnn.as_tensor(
-                    gate,
+                    gu,
                     dtype=expert_dtype,
                     device=mesh_device,
                     layout=ttnn.TILE_LAYOUT,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    cache_file_name=cache_name(f"experts.{e}.gate"),
-                )
-            )
-            self.expert_up.append(
-                ttnn.as_tensor(
-                    up,
-                    dtype=expert_dtype,
-                    device=mesh_device,
-                    layout=ttnn.TILE_LAYOUT,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    cache_file_name=cache_name(f"experts.{e}.up"),
+                    cache_file_name=cache_name(f"experts.{e}.gate_up"),
                 )
             )
             dn = raw_down[e].T.unsqueeze(0).unsqueeze(0).contiguous()
@@ -149,56 +136,61 @@ class Qwen35MoE(LightweightModule):
         x: [1, 1, B, hidden_size] on device (B=32 padded batch, only row 0 used for decode)
         Returns: [1, 1, B, hidden_size] on device
         """
+        L1 = ttnn.L1_MEMORY_CONFIG  # Small decode tensors fit in L1, avoid DRAM roundtrips
+
         # --- Queue shared expert + routing + gate on device BEFORE sync ---
-        shared_out = ttnn.linear(x, self.shared_w1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        shared_up = ttnn.linear(x, self.shared_w3, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        shared_out = ttnn.linear(x, self.shared_w1, memory_config=L1)
+        shared_up = ttnn.linear(x, self.shared_w3, memory_config=L1)
         shared_out = ttnn.mul(
             shared_out,
             shared_up,
             input_tensor_a_activations=[ttnn.UnaryOpType.SILU],
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            memory_config=L1,
         )
         ttnn.deallocate(shared_up)
-        shared_out = ttnn.linear(shared_out, self.shared_w2, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        shared_out = ttnn.linear(shared_out, self.shared_w2, memory_config=L1)
 
         # Router logits on device: [1,1,B,256] -- only sync 256 floats, not 2048
-        router_logits = ttnn.linear(x, self.router_weight_tt, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        router_logits = ttnn.linear(x, self.router_weight_tt, memory_config=L1)
 
-        # Shared expert gate on device: sigmoid(x @ gate_weight) → [1,1,B,1]
-        gate = ttnn.linear(x, self.shared_gate_weight_tt, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        gate = ttnn.sigmoid(gate, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        shared_out = ttnn.mul(shared_out, gate, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        # Shared expert gate on device: sigmoid(x @ gate_weight) -> [1,1,B,1]
+        gate = ttnn.linear(x, self.shared_gate_weight_tt, memory_config=L1)
+        gate = ttnn.sigmoid(gate, memory_config=L1)
+        shared_out = ttnn.mul(shared_out, gate, memory_config=L1)
         ttnn.deallocate(gate)
 
-        # --- Sync: read only 256-float router logits (1 KB vs 8 KB before) ---
+        # --- Sync: read only 256-float router logits (1 KB) ---
         logits_cpu = ttnn.to_torch(router_logits).float()[0, 0, 0, : self.num_experts]
         ttnn.deallocate(router_logits)
         topk_vals, topk_ids = torch.topk(logits_cpu, self.num_experts_per_tok)
         weights = F.softmax(topk_vals, dim=-1)
 
-        # --- Routed experts (top-k, sequential on device) ---
+        # --- Routed experts (top-k, fused gate+up, L1 intermediates) ---
         result = shared_out
         for i in range(self.num_experts_per_tok):
             eid = topk_ids[i].item()
             w = weights[i].item()
 
-            # Expert SwiGLU: silu(x @ gate) * (x @ up) -- separate matmuls, no split
-            gate_out = ttnn.linear(x, self.expert_gate[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG)
-            up_out = ttnn.linear(x, self.expert_up[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            # Fused gate+up: 1 matmul -> split -> SwiGLU (saves 1 matmul dispatch per expert)
+            gate_up = ttnn.linear(x, self.expert_gate_up[eid], memory_config=L1)
+            gate_out, up_out = ttnn.split(gate_up, self.moe_intermediate_size, dim=3)
+            ttnn.deallocate(gate_up)
             hidden = ttnn.mul(
                 gate_out,
                 up_out,
                 input_tensor_a_activations=[ttnn.UnaryOpType.SILU],
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                memory_config=L1,
             )
+            ttnn.deallocate(gate_out)
+            ttnn.deallocate(up_out)
 
-            expert_out = ttnn.linear(hidden, self.expert_down[eid], memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            expert_out = ttnn.linear(hidden, self.expert_down[eid], memory_config=L1)
             ttnn.deallocate(hidden)
 
             # Weighted accumulation
             if w != 1.0:
-                expert_out = ttnn.multiply(expert_out, w, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-            result = ttnn.add(result, expert_out, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                expert_out = ttnn.multiply(expert_out, w, memory_config=L1)
+            result = ttnn.add(result, expert_out, memory_config=L1)
             ttnn.deallocate(expert_out)
 
         return result

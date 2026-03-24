@@ -1,5 +1,11 @@
 [
     {
         "prompt": "<|im_start|>user\nWhat is the meaning of life?<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+        "prompt": "<|im_start|>user\nExplain the theory of relativity in simple terms.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+        "prompt": "<|im_start|>user\nWrite a short Python function that checks if a number is prime.<|im_end|>\n<|im_start|>assistant\n"
     }
 ]

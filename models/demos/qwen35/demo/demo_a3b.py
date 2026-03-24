@@ -214,6 +214,7 @@ def main():
     os.environ["HF_MODEL"] = hf_model
 
     device = ttnn.open_device(device_id=0)
+    device.enable_program_cache()
     args = ModelArgs(device, max_seq_len=args_cli.max_seq_len)
 
     print(f"Qwen3.5-35B-A3B: {args.n_layers} layers, dim={args.dim}, vocab={args.vocab_size}")

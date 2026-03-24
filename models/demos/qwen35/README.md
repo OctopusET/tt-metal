@@ -6,7 +6,7 @@ Qwen3.5-27B (dense) and Qwen3.5-35B-A3B (MoE) decode on single P100A Blackhole (
 
 | Model | Active params | tok/s | Method |
 |-------|-------------|-------|--------|
-| Qwen3.5-35B-A3B | 3B | **10.9** | Host recurrence + device MoE |
+| Qwen3.5-35B-A3B | 3B | **11.7** | Host recurrence + device MoE |
 | Qwen3.5-27B | 27B | **6.28** | Host recurrence + device MLP |
 
 Comparison: AmpereOne 128-core CPU runs A3B at 9.05 tok/s (llama.cpp Q4_K).
