@@ -96,32 +96,38 @@ void kernel_main() {
             for (uint32_t n = start_n; n < N && num_tiles_read < dst_num_tiles; ++n, start_c = 0) {
                 for (uint32_t c = start_c; c < C && num_tiles_read < dst_num_tiles; ++c, start_th = 0) {
                     for (uint32_t th = start_th; th < Ht && num_tiles_read < dst_num_tiles; ++th) {
-#if SRC_BCAST
+#if SRC_BCAST && !BCAST_LLK
+                        // Legacy path: read once, fill column, push once per th
                         cb_src.reserve_back(onetile);
 #if !SRC_SHARDED
                         noc.async_read(src, cb_src, src_tile_bytes, {.page_id = tile_offset + th}, {.offset_bytes = 0});
                         noc.async_read_barrier();
 #endif
-
-#if !BCAST_LLK
                         FILL_TILE_WITH_FIRST_COLUMN(cb_id_src);
-#endif
                         cb_src.push_back(onetile);
 #endif
-#if SRC_BCAST_B
+#if SRC_BCAST_B && !BCAST_LLK
                         cb_src_b.reserve_back(onetile);
 #if !SRC_SHARDED_B
                         noc.async_read(
                             src_b, cb_src_b, src_tile_bytes_b, {.page_id = tile_offset_b + th}, {.offset_bytes = 0});
                         noc.async_read_barrier();
 #endif
-#if !BCAST_LLK
                         FILL_TILE_WITH_FIRST_COLUMN_B(cb_id_src_b);
-#endif
                         cb_src_b.push_back(onetile);
 #endif
                         for (uint32_t tw = start_tw; tw < end_tw && num_tiles_read < dst_num_tiles;
                              ++tw, ++num_tiles_read) {
+#if SRC_BCAST && BCAST_LLK
+                            // LLK compute kernel pops bcast CB every tile, re-read same tile
+                            cb_src.reserve_back(onetile);
+#if !SRC_SHARDED
+                            noc.async_read(
+                                src, cb_src, src_tile_bytes, {.page_id = tile_offset + th}, {.offset_bytes = 0});
+                            noc.async_read_barrier();
+#endif
+                            cb_src.push_back(onetile);
+#endif
 #if !SRC_BCAST
                             cb_src.reserve_back(onetile);
 #if !SRC_SHARDED
@@ -130,6 +136,19 @@ void kernel_main() {
                             noc.async_read_barrier();
 #endif
                             cb_src.push_back(onetile);
+#endif
+#if SRC_BCAST_B && BCAST_LLK
+                            cb_src_b.reserve_back(onetile);
+#if !SRC_SHARDED_B
+                            noc.async_read(
+                                src_b,
+                                cb_src_b,
+                                src_tile_bytes_b,
+                                {.page_id = tile_offset_b + th},
+                                {.offset_bytes = 0});
+                            noc.async_read_barrier();
+#endif
+                            cb_src_b.push_back(onetile);
 #endif
 #if !SRC_BCAST_B
                             cb_src_b.reserve_back(onetile);
