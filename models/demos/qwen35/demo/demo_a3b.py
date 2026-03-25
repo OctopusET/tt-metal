@@ -167,7 +167,6 @@ def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=2
     for step in range(total_steps):
         tok = prompt_ids[step] if step < len(prompt_ids) else generated[-1]
 
-        # Embedding on CPU (reuse pre-allocated buffer)
         x_pad[0, 0, 0, :] = emb_weight_cpu[tok]
         x = ttnn.from_torch(x_pad, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
 
@@ -183,7 +182,6 @@ def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=2
         x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
         x = model.norm(x, mode=Mode.DECODE, norm_config=args.get_norm_config("lm_head", Mode.DECODE, None))
 
-        # LM head on device
         logits_tt = ttnn.linear(x, lm_weight_tt, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         logits_cpu = ttnn.to_torch(logits_tt).float()[0, 0, 0, : args.vocab_size]
         ttnn.deallocate(logits_tt)
