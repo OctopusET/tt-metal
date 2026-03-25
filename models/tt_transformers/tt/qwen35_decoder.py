@@ -149,24 +149,19 @@ class DeltaNetDecoderBlock(LightweightModule):
         #
         # Memory config: use the same DRAM-sharded residual config as the standard
         # TransformerBlock. The norm and MLP are configured to work with this layout.
-        _d = lambda s: print(s, end="", flush=True)
         _d(f"[D{self.layer_num}:")
         skip_mem_cfg = self.args.get_residual_mem_config(mode, self.prefetcher)
-        _d("m.")
         x = ttnn.to_memory_config(x, skip_mem_cfg)
         residual = x
 
-        _d("n.")
         attn_norm_config = self.args.get_norm_config("attn", mode, self.prefetcher)
         attn_in = self.attention_norm(x, mode, norm_config=attn_norm_config)
 
-        _d("a.")
         if hasattr(self.attention, "initialize_states"):
             attn_out = self.attention.forward(attn_in)
         else:
             attn_out = self.attention.forward(attn_in, current_pos=current_pos, rot_mats=rot_mats_global, mode=mode)
 
-        _d("r.")
         attn_out = ttnn.to_memory_config(attn_out, skip_mem_cfg)
         hidden_states = ttnn.add(residual, attn_out, memory_config=skip_mem_cfg)
         residual = hidden_states
@@ -174,22 +169,18 @@ class DeltaNetDecoderBlock(LightweightModule):
             x.deallocate(True)
         ttnn.deallocate(attn_out)
 
-        _d("f.")
         ff_norm_config = self.args.get_norm_config("ff", mode, self.prefetcher)
         hidden_states = self.ff_norm(hidden_states, mode, norm_config=ff_norm_config)
-        _d("M.")
         hidden_states = self.feed_forward.forward(hidden_states, mode)
 
         activation_dtype = self.args.decoders_optimizations.get_tensor_dtype(
             decoder_id=self.layer_num, tensor=TensorGroup.ACTIVATION
         )
 
-        _d("R.")
         out = ttnn.add(
             residual,
             hidden_states,
             memory_config=skip_mem_cfg,
             dtype=activation_dtype or ttnn.bfloat16,
         )
-        _d("]\n")
         return out
