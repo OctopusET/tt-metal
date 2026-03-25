@@ -21,7 +21,9 @@ from models.common.lightweightmodule import LightweightModule
 
 
 def _mul_bcast(a, b, mem=None):
-    """Multiply with COL broadcast support (fast_and_approximate_mode for FPU path)."""
+    """Multiply with COL broadcast support. Ensures smaller tensor is first (COL_A path)."""
+    if a.shape[-1] > b.shape[-1]:
+        a, b = b, a
     return ttnn.mul(a, b, fast_and_approximate_mode=True, memory_config=mem)
 
 
@@ -259,7 +261,7 @@ class GatedDeltaNet(LightweightModule):
         # 7. L2 normalize Q and K
         # norm(x) = x * rsqrt(sum(x^2))
         q_sq = _mul_bcast(q_heads, q_heads, L1)
-        q_norm_sq = ttnn.sum(q_sq, dim=3, memory_config=L1)
+        q_norm_sq = ttnn.sum(q_sq, dim=3, keepdim=True, memory_config=L1)
         ttnn.deallocate(q_sq)
         q_inv = ttnn.rsqrt(q_norm_sq, memory_config=L1)
         ttnn.deallocate(q_norm_sq)
@@ -268,7 +270,7 @@ class GatedDeltaNet(LightweightModule):
         q_heads = ttnn.multiply(q_heads, self.scale, memory_config=L1)
 
         k_sq = _mul_bcast(k_heads, k_heads, L1)
-        k_norm_sq = ttnn.sum(k_sq, dim=3, memory_config=L1)
+        k_norm_sq = ttnn.sum(k_sq, dim=3, keepdim=True, memory_config=L1)
         ttnn.deallocate(k_sq)
         k_inv = ttnn.rsqrt(k_norm_sq, memory_config=L1)
         ttnn.deallocate(k_norm_sq)
@@ -335,7 +337,7 @@ class GatedDeltaNet(LightweightModule):
 
         # 14. Gated RMSNorm: normed = x * rsqrt(mean(x^2)) * weight * silu(z)
         out_sq = _mul_bcast(output_heads, output_heads, L1)
-        variance = ttnn.mean(out_sq, dim=3, memory_config=L1)  # [1,H,1,1]
+        variance = ttnn.mean(out_sq, dim=3, keepdim=True, memory_config=L1)  # [1,H,1,1]
         ttnn.deallocate(out_sq)
         inv_rms = ttnn.rsqrt(variance, memory_config=L1)
         ttnn.deallocate(variance)
