@@ -7,7 +7,6 @@ Qwen3.5-35B-A3B decode demo on single P100A Blackhole.
 
 Hybrid DeltaNet + Attention architecture with MoE (256 experts, top-8 + shared).
 40 layers: 30 DeltaNet + 10 full attention, all with MoE MLPs.
-DeltaNet recurrence on host (float32), projections/MoE on device (bfp8/bfp4).
 
 Usage:
     export HF_MODEL=Qwen/Qwen3.5-35B-A3B
@@ -20,6 +19,7 @@ import os
 import time
 
 import torch
+from loguru import logger
 from tqdm import tqdm
 
 import ttnn
@@ -53,8 +53,6 @@ def build_model(device, args, sd):
     wcp = args.weight_cache_path(dtype=ttnn.bfloat8_b)
 
     # RoPE with partial rotation (64/256 dims)
-    # HfRotarySetup for HF-style RoPE (use_hf_rope=True for Qwen3.5).
-    # Returns full cos/sin cache; ttnn.experimental.rotary_embedding slices by position.
     model.rope_setup = HfRotarySetup(
         device=device,
         batch_size=args.max_batch_size,
@@ -65,29 +63,21 @@ def build_model(device, args, sd):
     )
     partial = getattr(args, "partial_rotary_factor", 1.0)
     if partial < 1.0:
-        # Fix cos/sin for partial rotation with correct frequencies.
-        # HfRotarySetup computes 1/theta^(2i/head_dim) for head_dim=256.
-        # Qwen3.5 needs 1/theta^(2i/rotary_dim) for rotary_dim=64.
-        # HF format: cos/sin [1, 1, seq_len, head_dim] where dims are paired
-        # as (d, d+head_dim//2) -- first half and second half are duplicated.
-        rotary_dim = int(args.head_dim * partial)  # 64
-        half_rotary = rotary_dim // 2  # 32
-        half_head = args.head_dim // 2  # 128
+        rotary_dim = int(args.head_dim * partial)
+        half_rotary = rotary_dim // 2
+        half_head = args.head_dim // 2
 
         inv_freq_correct = 1.0 / (args.rope_theta ** (torch.arange(0, rotary_dim, 2).float() / rotary_dim))
         positions = torch.arange(args.max_seq_len).float()
-        freqs = torch.outer(positions, inv_freq_correct)  # [seq_len, 32]
+        freqs = torch.outer(positions, inv_freq_correct)
 
         cos_h = ttnn.to_torch(model.rope_setup.cos_matrix)
         sin_h = ttnn.to_torch(model.rope_setup.sin_matrix)
 
-        # HF format: first half_head dims duplicate second half_head dims.
-        # Pairs: (dim j, dim j+half_head). Replace first half_rotary pairs with correct freqs.
         cos_h[:, :, :, :half_rotary] = freqs.cos().unsqueeze(0).unsqueeze(0)
         cos_h[:, :, :, half_head : half_head + half_rotary] = freqs.cos().unsqueeze(0).unsqueeze(0)
         sin_h[:, :, :, :half_rotary] = freqs.sin().unsqueeze(0).unsqueeze(0)
         sin_h[:, :, :, half_head : half_head + half_rotary] = freqs.sin().unsqueeze(0).unsqueeze(0)
-        # Non-rotary dims: cos=1, sin=0
         cos_h[:, :, :, half_rotary:half_head] = 1.0
         cos_h[:, :, :, half_head + half_rotary :] = 1.0
         sin_h[:, :, :, half_rotary:half_head] = 0.0
@@ -104,11 +94,10 @@ def build_model(device, args, sd):
 
     model.trans_mats_dict = model.rope_setup.get_both_trans_mats()
 
-    # Build layers: all use DeltaNetDecoderBlock with MoE
     layers = []
     for i in tqdm(range(args.n_layers), desc="Layers"):
         if args.layer_types[i] == "linear_attention":
-            attention_class = None  # default: GatedDeltaNet
+            attention_class = None
         else:
             attention_class = GatedAttention
 
@@ -127,7 +116,6 @@ def build_model(device, args, sd):
         )
     model.layers = layers
 
-    # Output norm
     model.norm = DistributedNorm(
         RMSNorm(
             device=device,
@@ -152,21 +140,27 @@ def build_model(device, args, sd):
 
 
 def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=200):
-    """Generate tokens given prompt token IDs."""
+    """Generate tokens given prompt token IDs. Returns (tokens, perf_stats)."""
     device = model.mesh_device
     tokenizer = args.tokenizer
     generated = list(prompt_ids)
     B = args.tile_padded_batch_rows
 
-    # Pre-allocate reusable tensors (avoid allocation per step)
+    # Pre-allocate host buffers
     x_pad = torch.zeros(1, 1, B, args.dim)
     pos_tensor = torch.tensor([0], dtype=torch.int32)
     rot_idx_tensor = torch.tensor([[0]], dtype=torch.int64)
 
     total_steps = min(len(prompt_ids) + max_tokens, args.max_seq_len)
-    for step in range(total_steps):
-        tok = prompt_ids[step] if step < len(prompt_ids) else generated[-1]
+    num_prompt = len(prompt_ids)
 
+    compile_time = 0.0
+    decode_times = []
+
+    for step in range(total_steps):
+        tok = prompt_ids[step] if step < num_prompt else generated[-1]
+
+        # Embedding on host (small), transfer to device
         x_pad[0, 0, 0, :] = emb_weight_cpu[tok]
         x = ttnn.from_torch(x_pad, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
 
@@ -176,6 +170,7 @@ def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=2
         rot_idxs = ttnn.from_torch(rot_idx_tensor, device=device)
         rot_mats = model.rope_setup.get_rot_mats(rot_idxs)
 
+        t0 = time.perf_counter()
         for layer in model.layers:
             x = layer(x, current_pos=tt_pos, rot_mats_global=rot_mats, mode=Mode.DECODE)
 
@@ -183,16 +178,42 @@ def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=2
         x = model.norm(x, mode=Mode.DECODE, norm_config=args.get_norm_config("lm_head", Mode.DECODE, None))
 
         logits_tt = ttnn.linear(x, lm_weight_tt, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        ttnn.synchronize_device(device)
+        dt = time.perf_counter() - t0
+
         logits_cpu = ttnn.to_torch(logits_tt).float()[0, 0, 0, : args.vocab_size]
         ttnn.deallocate(logits_tt)
         next_token = logits_cpu.argmax().item()
 
-        if step >= len(prompt_ids) - 1:
+        # Timing: step 0 = compile, step 1 = program cache warmup, step 2+ = steady state
+        if step == 0:
+            compile_time = dt
+            logger.info(f"Step 0 (compile): {dt*1000:.0f}ms")
+        elif step == 1:
+            logger.info(f"Step 1 (cache warmup): {dt*1000:.0f}ms")
+        else:
+            decode_times.append(dt)
+            if step < num_prompt + 5 or step % 10 == 0:
+                logger.info(f"Step {step}: {dt*1000:.1f}ms ({1/dt:.1f} tok/s)")
+
+        if step >= num_prompt - 1:
             generated.append(next_token)
             if tokenizer.decode([next_token]) in ["<|im_end|>", "<|endoftext|>"]:
                 break
 
-    return generated
+    # Statistics
+    stats = {}
+    stats["compile_time_ms"] = compile_time * 1000
+    if decode_times:
+        avg_dt = sum(decode_times) / len(decode_times)
+        stats["avg_decode_ms"] = avg_dt * 1000
+        stats["tokens_per_second"] = 1.0 / avg_dt
+        stats["num_decode_tokens"] = len(decode_times)
+        stats["total_decode_time_s"] = sum(decode_times)
+    else:
+        stats["tokens_per_second"] = 0.0
+
+    return generated, stats
 
 
 def main():
@@ -203,7 +224,6 @@ def main():
     parser.add_argument("--max_seq_len", type=int, default=256, help="Max sequence length")
     args_cli = parser.parse_args()
 
-    # Resolve HF model name to local snapshot path
     hf_model = os.environ.get("HF_MODEL", "Qwen/Qwen3.5-35B-A3B")
     if not os.path.isdir(hf_model):
         from huggingface_hub import snapshot_download
@@ -215,15 +235,14 @@ def main():
     device.enable_program_cache()
     args = ModelArgs(device, max_seq_len=args_cli.max_seq_len)
 
-    print(f"Qwen3.5-35B-A3B: {args.n_layers} layers, dim={args.dim}, vocab={args.vocab_size}")
-    print(f"  MoE: {args.num_experts} experts, top-{args.num_experts_per_tok}")
+    logger.info(f"Qwen3.5-35B-A3B: {args.n_layers} layers, dim={args.dim}, vocab={args.vocab_size}")
+    logger.info(f"  MoE: {args.num_experts} experts, top-{args.num_experts_per_tok}")
     sd = args.load_state_dict()
     emb_weight_cpu = sd[args.get_state_dict_prefix("", None) + "tok_embeddings.weight"].float()
 
-    # LM head on device (248320 x 2048, bfp8)
     wcp = args.weight_cache_path(dtype=ttnn.bfloat8_b)
     lm_weight_tt = ttnn.as_tensor(
-        sd["output.weight"].T.unsqueeze(0).unsqueeze(0).contiguous(),  # (1,1,dim,vocab)
+        sd["output.weight"].T.unsqueeze(0).unsqueeze(0).contiguous(),
         dtype=ttnn.bfloat8_b,
         device=device,
         layout=ttnn.TILE_LAYOUT,
@@ -231,14 +250,13 @@ def main():
         cache_file_name=wcp / "lm_head_output",
     )
 
-    print("Building model...")
+    logger.info("Building model...")
     model = build_model(device, args, sd)
     del sd
-    print("Model ready!")
+    logger.info("Model ready!")
 
     tokenizer = args.tokenizer
 
-    # Get prompt
     if args_cli.prompt_file:
         with open(args_cli.prompt_file) as f:
             prompts = json.load(f)
@@ -249,17 +267,23 @@ def main():
         prompt = "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
 
     ids = tokenizer.encode(prompt)
-    print(f"Prompt: {repr(prompt.strip())} ({len(ids)} tokens)")
-    print(f"Generating up to {args_cli.max_tokens} tokens...\n")
+    logger.info(f"Prompt: {repr(prompt.strip())} ({len(ids)} tokens)")
+    logger.info(f"Generating up to {args_cli.max_tokens} tokens...\n")
 
-    t0 = time.time()
-    generated = generate(model, args, emb_weight_cpu, lm_weight_tt, ids, args_cli.max_tokens)
-    dt = time.time() - t0
+    generated, stats = generate(model, args, emb_weight_cpu, lm_weight_tt, ids, args_cli.max_tokens)
 
     n = len(generated) - len(ids)
     output_text = tokenizer.decode(generated)
-    print(f"\n\n[{n} tokens in {dt:.1f}s = {n / dt:.2f} tok/s]")
-    print(f"\nFull output:\n{output_text}")
+
+    print(f"\n{'='*60}")
+    print(f"  Generated {n} tokens")
+    print(f"  Compile:       {stats['compile_time_ms']:.0f}ms")
+    if stats.get("num_decode_tokens"):
+        print(f"  Avg decode:    {stats['avg_decode_ms']:.1f}ms/token")
+        print(f"  Throughput:    {stats['tokens_per_second']:.2f} tok/s")
+        print(f"  (measured over {stats['num_decode_tokens']} tokens, excluding compile + warmup)")
+    print(f"{'='*60}")
+    print(f"\n{output_text}")
 
     ttnn.close_device(device)
 

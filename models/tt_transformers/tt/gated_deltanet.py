@@ -5,8 +5,7 @@
 """
 Gated DeltaNet (linear attention) module for Qwen3.5.
 
-Projections on device (bfp8), recurrence on host (float32).
-Host roundtrip is ~50 KB per layer per token.
+Fully device-side: projections, conv1d, fused kernel. Zero host sync.
 
 Reference: "Gated Delta Networks with Softmax Attention" (Yang et al., 2025)
 """
@@ -84,11 +83,43 @@ class GatedDeltaNet(LightweightModule):
             cache_file_name=cache_name("out_proj"),
         )
 
+        # Conv weights on device: 4 rows
         conv_weight_raw = state_dict[f"{layer_prefix}.conv1d.weight"].float().squeeze(1)
-        self._conv_w = conv_weight_raw.T
-        self._dt_bias = load_param("dt_bias").float()
-        self._A_exp = load_param("A_log").float().exp()
-        self._norm_w = state_dict[f"{layer_prefix}.norm.weight"].float()
+        conv_w_host = conv_weight_raw.T
+        B = getattr(args, "tile_padded_batch_rows", 32)
+        self._conv_w_devs = []
+        for r in range(self.conv_kernel_size):
+            w_pad = torch.zeros(1, 1, B, self.conv_dim, dtype=torch.bfloat16)
+            w_pad[0, 0, 0, :] = conv_w_host[r].bfloat16()
+            self._conv_w_devs.append(
+                ttnn.from_torch(
+                    w_pad, layout=ttnn.TILE_LAYOUT, device=mesh_device, memory_config=ttnn.DRAM_MEMORY_CONFIG
+                )
+            )
+
+        # Constant device tensors
+        dt_bias = load_param("dt_bias").float()
+        A_exp = load_param("A_log").float().exp()
+        norm_w = state_dict[f"{layer_prefix}.norm.weight"].float()
+
+        self._dt_bias_dev = ttnn.from_torch(
+            dt_bias.reshape(1, self.num_v_heads, 1, 1).bfloat16(),
+            layout=ttnn.TILE_LAYOUT,
+            device=mesh_device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self._neg_A_exp_dev = ttnn.from_torch(
+            (-A_exp).reshape(1, self.num_v_heads, 1, 1).bfloat16(),
+            layout=ttnn.TILE_LAYOUT,
+            device=mesh_device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self._norm_w_dev = ttnn.from_torch(
+            norm_w.unsqueeze(0).expand(self.num_v_heads, -1).unsqueeze(0).unsqueeze(2).contiguous().bfloat16(),
+            layout=ttnn.TILE_LAYOUT,
+            device=mesh_device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
 
     @property
     def layer_past(self):
@@ -99,63 +130,81 @@ class GatedDeltaNet(LightweightModule):
         pass
 
     def initialize_states(self, batch_size=1, B_pad=32):
-        self._host_state = torch.zeros(self.num_v_heads, self.head_k_dim, self.head_v_dim)
-        self._conv_state = torch.zeros(self.conv_kernel_size, self.conv_dim)
-        self._out_pad = torch.zeros(1, 1, B_pad, self.value_dim)
-
-    def forward(self, x):
-        B_pad = x.shape[2]
-        F = torch.nn.functional
-
-        all_proj = ttnn.linear(x, self.in_proj_all, compute_kernel_config=self.proj_compute_config)
-
-        all_h = ttnn.to_torch(all_proj).float()[0, 0, 0, :]
-        ttnn.deallocate(all_proj)
-
-        s = self._proj_splits
-        qkv_h = all_h[: s[0]]
-        z_h = all_h[s[0] : s[0] + s[1]]
-        b_h = all_h[s[0] + s[1] : s[0] + s[1] + s[2]]
-        a_h = all_h[s[0] + s[1] + s[2] :]
-
-        self._conv_state[:-1] = self._conv_state[1:].clone()
-        self._conv_state[-1] = qkv_h
-        qkv_h = F.silu((self._conv_state * self._conv_w).sum(dim=0))
-
-        q_h = qkv_h[: self.key_dim].reshape(self.num_k_heads, self.head_k_dim)
-        k_h = qkv_h[self.key_dim : 2 * self.key_dim].reshape(self.num_k_heads, self.head_k_dim)
-        v_h = qkv_h[2 * self.key_dim :].reshape(self.num_v_heads, self.head_v_dim)
-        if self.gqa_ratio > 1:
-            q_h = q_h.repeat_interleave(self.gqa_ratio, dim=0)
-            k_h = k_h.repeat_interleave(self.gqa_ratio, dim=0)
-        q_h = F.normalize(q_h, dim=-1) * self.scale
-        k_h = F.normalize(k_h, dim=-1)
-
-        beta = b_h.sigmoid()
-        decay = (-self._A_exp * F.softplus(a_h + self._dt_bias)).exp()
-
-        self._host_state *= decay.unsqueeze(-1).unsqueeze(-1)
-        kv_mem = torch.bmm(k_h.unsqueeze(1), self._host_state).squeeze(1)
-        delta = (v_h - kv_mem) * beta.unsqueeze(-1)
-        self._host_state += torch.bmm(k_h.unsqueeze(2), delta.unsqueeze(1))
-        output_h = torch.bmm(q_h.unsqueeze(1), self._host_state).squeeze(1)
-
-        z_heads = z_h.reshape(self.num_v_heads, self.head_v_dim)
-        variance = output_h.pow(2).mean(-1, keepdim=True)
-        output_normed = output_h * torch.rsqrt(variance + self.args.norm_eps)
-        output_normed = output_normed * self._norm_w
-        output_gated = output_normed * F.silu(z_heads)
-        output_flat = output_gated.reshape(1, self.value_dim)
-
-        self._out_pad.zero_()
-        self._out_pad[0, 0, 0, :] = output_flat
-        output = ttnn.from_torch(
-            self._out_pad,
-            dtype=ttnn.bfloat16,
+        H, D = self.num_v_heads, self.head_v_dim
+        # Conv state: 4 device tensors (circular buffer)
+        self._conv_rows = []
+        for _ in range(self.conv_kernel_size):
+            self._conv_rows.append(
+                ttnn.from_torch(
+                    torch.zeros(1, 1, B_pad, self.conv_dim, dtype=torch.bfloat16),
+                    layout=ttnn.TILE_LAYOUT,
+                    device=self.mesh_device,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                )
+            )
+        self._oldest = 0
+        # Recurrent state on device
+        self._dev_state = ttnn.from_torch(
+            torch.zeros(1, H, self.head_k_dim, D),
+            dtype=ttnn.float32,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
-        output = ttnn.linear(output, self.out_proj, compute_kernel_config=self.proj_compute_config)
 
+    def forward(self, x):
+        B = x.shape[2]
+        s = self._proj_splits
+
+        # 1. Projection on device
+        proj = ttnn.linear(x, self.in_proj_all, compute_kernel_config=self.proj_compute_config)
+
+        # 2. Conv state update: in-place copy (preserves tensor addresses for trace)
+        qkv_new = ttnn.slice(proj, [0, 0, 0, 0], [1, 1, B, self.conv_dim])
+        ttnn.copy(qkv_new, self._conv_rows[self._oldest])
+        ttnn.deallocate(qkv_new)
+        self._oldest = (self._oldest + 1) % self.conv_kernel_size
+
+        # 3. Conv1d on device: weighted sum + SiLU
+        acc = ttnn.multiply(self._conv_rows[self._oldest], self._conv_w_devs[0])
+        for i in range(1, self.conv_kernel_size):
+            idx = (self._oldest + i) % self.conv_kernel_size
+            product = ttnn.multiply(self._conv_rows[idx], self._conv_w_devs[i])
+            old_acc = acc
+            acc = ttnn.add(acc, product)
+            ttnn.deallocate(product)
+            ttnn.deallocate(old_acc)
+        conv_out = ttnn.silu(acc)
+        ttnn.deallocate(acc)
+
+        # 4. Extract z and b/a from projection (device slice, no host sync)
+        z_flat = ttnn.slice(proj, [0, 0, 0, s[0]], [1, 1, B, s[0] + s[1]])
+        ba_start = s[0] + s[1]
+        ba_flat = ttnn.slice(proj, [0, 0, 0, ba_start], [1, 1, B, ba_start + 2 * self.num_v_heads])
+        ttnn.deallocate(proj)
+
+        # 5. Fused kernel
+        result = ttnn.experimental.gated_delta_net(
+            conv_out,
+            z_flat,
+            ba_flat,
+            self._dt_bias_dev,
+            self._neg_A_exp_dev,
+            self._dev_state,
+            self._norm_w_dev,
+            scale=self.scale,
+            norm_eps=self.args.norm_eps,
+            key_dim=self.key_dim,
+            gqa_ratio=self.gqa_ratio,
+        )
+        output_tt = result[0]
+        ttnn.copy(result[1], self._dev_state)
+        ttnn.deallocate(result[1])
+        ttnn.deallocate(conv_out)
+        ttnn.deallocate(z_flat)
+        ttnn.deallocate(ba_flat)
+
+        # 6. Reshape + output projection
+        output_tt = ttnn.reshape(output_tt, [1, 1, -1, self.value_dim])
+        output = ttnn.linear(output_tt, self.out_proj, compute_kernel_config=self.proj_compute_config)
         return output

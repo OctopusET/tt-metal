@@ -23,14 +23,18 @@ void bind_gated_delta_net(nb::module_& mod) {
         mod,
         doc,
         &ttnn::experimental::gated_delta_net,
-        nb::arg("q"),
-        nb::arg("k"),
-        nb::arg("v"),
-        nb::arg("decay"),
-        nb::arg("beta"),
+        nb::arg("conv_out"),
+        nb::arg("z_flat"),
+        nb::arg("ba_flat"),
+        nb::arg("dt_bias"),
+        nb::arg("neg_A_exp"),
         nb::arg("state"),
+        nb::arg("norm_weight"),
         nb::kw_only(),
         nb::arg("scale") = 1.0f,
+        nb::arg("norm_eps") = 1e-6f,
+        nb::arg("key_dim") = 2048,
+        nb::arg("gqa_ratio") = 1,
         nb::arg("memory_config") = nb::none());
 }
 

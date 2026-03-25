@@ -12,32 +12,31 @@ using namespace tt::tt_metal;
 namespace ttnn::experimental::prim {
 
 void GatedDeltaNetDeviceOperation::validate_on_program_cache_miss(
-    const operation_attributes_t& /*args*/, const tensor_args_t& tensor_args) {
-    const auto& q = tensor_args.q;
+    const operation_attributes_t& args, const tensor_args_t& tensor_args) {
+    const auto& conv_out = tensor_args.conv_out;
     const auto& state = tensor_args.state;
 
-    TT_FATAL(q.storage_type() == StorageType::DEVICE, "Inputs must be on device");
-    TT_FATAL(q.layout() == Layout::TILE, "Expected TILE layout");
+    TT_FATAL(conv_out.storage_type() == StorageType::DEVICE, "Inputs must be on device");
+    TT_FATAL(conv_out.layout() == Layout::TILE, "Expected TILE layout");
     TT_FATAL(state.layout() == Layout::TILE, "Expected TILE layout for state");
     TT_FATAL(state.dtype() == DataType::FLOAT32 || state.dtype() == DataType::BFLOAT16, "State must be fp32 or bf16");
-    TT_FATAL(q.memory_config().memory_layout() == TensorMemoryLayout::INTERLEAVED, "Expected interleaved tensors");
-    TT_FATAL(q.padded_shape()[1] == state.padded_shape()[1], "Q and state must have same num_heads");
+    TT_FATAL(args.key_dim > 0, "key_dim must be > 0");
+    TT_FATAL(args.gqa_ratio > 0, "gqa_ratio must be > 0");
 }
 
 GatedDeltaNetDeviceOperation::spec_return_value_t GatedDeltaNetDeviceOperation::compute_output_specs(
     const operation_attributes_t& args, const tensor_args_t& tensor_args) {
-    const auto& q = tensor_args.q;
     const auto& state = tensor_args.state;
     const auto& memory_config = args.memory_config;
 
+    uint32_t num_heads = state.logical_shape()[1];
+    uint32_t head_dim = state.logical_shape()[3];
+    auto out_shape = ttnn::Shape({1, num_heads, 1, head_dim});
+
     std::vector<TensorSpec> output_specs;
     output_specs.reserve(2);
-
-    // output: same shape as q, bf16
     output_specs.push_back(
-        TensorSpec(q.logical_shape(), TensorLayout(DataType::BFLOAT16, PageConfig(Layout::TILE), memory_config)));
-
-    // new_state: same shape and dtype as input state
+        TensorSpec(out_shape, TensorLayout(DataType::BFLOAT16, PageConfig(Layout::TILE), memory_config)));
     output_specs.push_back(
         TensorSpec(state.logical_shape(), TensorLayout(state.dtype(), PageConfig(Layout::TILE), memory_config)));
 
@@ -47,7 +46,7 @@ GatedDeltaNetDeviceOperation::spec_return_value_t GatedDeltaNetDeviceOperation::
 GatedDeltaNetDeviceOperation::tensor_return_value_t GatedDeltaNetDeviceOperation::create_output_tensors(
     const operation_attributes_t& args, const tensor_args_t& tensor_args) {
     const auto output_specs = compute_output_specs(args, tensor_args);
-    auto* device = tensor_args.q.device();
+    auto* device = tensor_args.conv_out.device();
 
     std::vector<Tensor> output_tensors;
     output_tensors.reserve(output_specs.size());
@@ -58,11 +57,10 @@ GatedDeltaNetDeviceOperation::tensor_return_value_t GatedDeltaNetDeviceOperation
 }
 
 ttsl::hash::hash_t GatedDeltaNetDeviceOperation::compute_program_hash(
-    const operation_attributes_t& /*args*/, const tensor_args_t& tensor_args) {
-    const auto& q = tensor_args.q;
+    const operation_attributes_t& args, const tensor_args_t& tensor_args) {
     const auto& state = tensor_args.state;
     return operation::hash_operation<GatedDeltaNetDeviceOperation>(
-        q.dtype(), state.dtype(), q.memory_config(), q.padded_shape().volume(), state.padded_shape().volume());
+        state.dtype(), state.memory_config(), state.padded_shape().volume(), args.key_dim, args.gqa_ratio);
 }
 
 }  // namespace ttnn::experimental::prim
@@ -70,18 +68,22 @@ ttsl::hash::hash_t GatedDeltaNetDeviceOperation::compute_program_hash(
 namespace ttnn::prim {
 
 std::vector<Tensor> gated_delta_net(
-    const Tensor& q,
-    const Tensor& k,
-    const Tensor& v,
-    const Tensor& decay,
-    const Tensor& beta,
+    const Tensor& conv_out,
+    const Tensor& z_flat,
+    const Tensor& ba_flat,
+    const Tensor& dt_bias,
+    const Tensor& neg_A_exp,
     const Tensor& state,
+    const Tensor& norm_weight,
     float scale,
+    float norm_eps,
+    uint32_t key_dim,
+    uint32_t gqa_ratio,
     const std::optional<MemoryConfig>& memory_config) {
     using OpType = ttnn::experimental::prim::GatedDeltaNetDeviceOperation;
-    auto mem_cfg = memory_config.value_or(q.memory_config());
-    auto attrs = OpType::operation_attributes_t{mem_cfg, scale};
-    auto inputs = OpType::tensor_args_t{q, k, v, decay, beta, state};
+    auto mem_cfg = memory_config.value_or(conv_out.memory_config());
+    auto attrs = OpType::operation_attributes_t{mem_cfg, scale, norm_eps, key_dim, gqa_ratio};
+    auto inputs = OpType::tensor_args_t{conv_out, z_flat, ba_flat, dt_bias, neg_A_exp, state, norm_weight};
     return ttnn::device_operation::launch<OpType>(attrs, inputs);
 }
 
