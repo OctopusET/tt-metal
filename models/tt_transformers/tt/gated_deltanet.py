@@ -143,9 +143,9 @@ class GatedDeltaNet(LightweightModule):
                 )
             )
         self._oldest = 0
-        # Recurrent state on device
+        # Recurrent state on device: [batch_size, H, K, D]
         self._dev_state = ttnn.from_torch(
-            torch.zeros(1, H, self.head_k_dim, D),
+            torch.zeros(batch_size, H, self.head_k_dim, D),
             dtype=ttnn.float32,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
@@ -204,7 +204,10 @@ class GatedDeltaNet(LightweightModule):
         ttnn.deallocate(z_flat)
         ttnn.deallocate(ba_flat)
 
-        # 6. Reshape + output projection
+        # 6. Reshape kernel output for out_proj: [1, H, B, D] -> [1, 1, B, H*D]
+        # For batch>1, permute is needed because ttnn.reshape can't flatten dim1->dim3 in tile layout.
+        if output_tt.shape[2] > 1:
+            output_tt = ttnn.permute(output_tt, [0, 2, 1, 3])
         output_tt = ttnn.reshape(output_tt, [1, 1, -1, self.value_dim])
         output = ttnn.linear(output_tt, self.out_proj, compute_kernel_config=self.proj_compute_config)
         return output

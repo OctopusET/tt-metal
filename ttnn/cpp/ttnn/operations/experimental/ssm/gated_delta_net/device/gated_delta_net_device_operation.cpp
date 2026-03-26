@@ -29,9 +29,10 @@ GatedDeltaNetDeviceOperation::spec_return_value_t GatedDeltaNetDeviceOperation::
     const auto& state = tensor_args.state;
     const auto& memory_config = args.memory_config;
 
+    uint32_t batch_size = state.logical_shape()[0];
     uint32_t num_heads = state.logical_shape()[1];
     uint32_t head_dim = state.logical_shape()[3];
-    auto out_shape = ttnn::Shape({1, num_heads, 1, head_dim});
+    auto out_shape = ttnn::Shape({1, num_heads, batch_size, head_dim});
 
     std::vector<TensorSpec> output_specs;
     output_specs.reserve(2);

@@ -545,5 +545,14 @@ void kernel_main() {
         cb_pop_front(cb_tmp2, D_TILES);
         cb_pop_front(cb_z, D_TILES);
         cb_pop_front(cb_norm_w, D_TILES);
+
+        // Scaler constants reused across batch iterations (not popped per iteration)
     }
+
+    // Pop scaler constants ONCE after all iterations (reader pushed them once per head).
+    // CBs must be empty at end of dispatch for program cache reuse.
+    cb_pop_front(cb_scaler, 1);
+    cb_pop_front(cb_eps, 1);
+    cb_pop_front(cb_scaler_one, 1);
+    cb_pop_front(cb_q_scale, 1);
 }

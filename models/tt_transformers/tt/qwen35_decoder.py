@@ -71,7 +71,8 @@ class DeltaNetDecoderBlock(LightweightModule):
                 layer_num=layer_num,
                 dtype=dtype,
             )
-            self.attention.initialize_states()
+            batch = getattr(args, "batch_size", 1)
+            self.attention.initialize_states(batch_size=batch)
 
         # MLP: use custom class (e.g. Qwen35MoE) or standard MLP
         mlp_cls = mlp_class or MLP

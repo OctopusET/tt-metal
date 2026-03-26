@@ -140,11 +140,16 @@ def build_model(device, args, sd):
 
 
 def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=200):
-    """Generate tokens given prompt token IDs. Returns (tokens, perf_stats)."""
+    """Generate tokens given prompt token IDs. Returns (tokens, perf_stats).
+
+    With batch_size > 1, replicates the same prompt to all batch slots and
+    reports throughput as batch_size * tokens_per_second_per_user.
+    """
     device = model.mesh_device
     tokenizer = args.tokenizer
     generated = list(prompt_ids)
     B = args.tile_padded_batch_rows
+    batch_size = getattr(args, "batch_size", 1)
 
     # Pre-allocate host buffers
     x_pad = torch.zeros(1, 1, B, args.dim)
@@ -160,8 +165,10 @@ def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=2
     for step in range(total_steps):
         tok = prompt_ids[step] if step < num_prompt else generated[-1]
 
-        # Embedding on host (small), transfer to device
-        x_pad[0, 0, 0, :] = emb_weight_cpu[tok]
+        # Embedding on host: fill batch_size rows with same token
+        emb = emb_weight_cpu[tok]
+        for bi in range(batch_size):
+            x_pad[0, 0, bi, :] = emb
         x = ttnn.from_torch(x_pad, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
 
         pos_tensor[0] = step
@@ -193,8 +200,9 @@ def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=2
             logger.info(f"Step 1 (cache warmup): {dt*1000:.0f}ms")
         else:
             decode_times.append(dt)
+            tps = batch_size / dt
             if step < num_prompt + 5 or step % 10 == 0:
-                logger.info(f"Step {step}: {dt*1000:.1f}ms ({1/dt:.1f} tok/s)")
+                logger.info(f"Step {step}: {dt*1000:.1f}ms ({tps:.1f} tok/s, batch={batch_size})")
 
         if step >= num_prompt - 1:
             generated.append(next_token)
@@ -204,10 +212,12 @@ def generate(model, args, emb_weight_cpu, lm_weight_tt, prompt_ids, max_tokens=2
     # Statistics
     stats = {}
     stats["compile_time_ms"] = compile_time * 1000
+    stats["batch_size"] = batch_size
     if decode_times:
         avg_dt = sum(decode_times) / len(decode_times)
         stats["avg_decode_ms"] = avg_dt * 1000
-        stats["tokens_per_second"] = 1.0 / avg_dt
+        stats["tokens_per_second"] = batch_size / avg_dt
+        stats["per_user_tok_s"] = 1.0 / avg_dt
         stats["num_decode_tokens"] = len(decode_times)
         stats["total_decode_time_s"] = sum(decode_times)
     else:
@@ -222,6 +232,7 @@ def main():
     parser.add_argument("--prompt_file", type=str, default=None, help="JSON file with prompts")
     parser.add_argument("--max_tokens", type=int, default=200, help="Max tokens to generate")
     parser.add_argument("--max_seq_len", type=int, default=256, help="Max sequence length")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size (1 or 32)")
     args_cli = parser.parse_args()
 
     hf_model = os.environ.get("HF_MODEL", "Qwen/Qwen3.5-35B-A3B")
@@ -234,8 +245,12 @@ def main():
     device = ttnn.open_device(device_id=0)
     device.enable_program_cache()
     args = ModelArgs(device, max_seq_len=args_cli.max_seq_len)
+    assert args_cli.batch_size in (1, 32), f"batch_size must be 1 or 32, got {args_cli.batch_size}"
+    args.batch_size = args_cli.batch_size
 
-    logger.info(f"Qwen3.5-35B-A3B: {args.n_layers} layers, dim={args.dim}, vocab={args.vocab_size}")
+    logger.info(
+        f"Qwen3.5-35B-A3B: {args.n_layers} layers, dim={args.dim}, vocab={args.vocab_size}, batch={args.batch_size}"
+    )
     logger.info(f"  MoE: {args.num_experts} experts, top-{args.num_experts_per_tok}")
     sd = args.load_state_dict()
     emb_weight_cpu = sd[args.get_state_dict_prefix("", None) + "tok_embeddings.weight"].float()
@@ -276,12 +291,14 @@ def main():
     output_text = tokenizer.decode(generated)
 
     print(f"\n{'='*60}")
-    print(f"  Generated {n} tokens")
+    print(f"  Generated {n} tokens (batch={stats.get('batch_size', 1)})")
     print(f"  Compile:       {stats['compile_time_ms']:.0f}ms")
     if stats.get("num_decode_tokens"):
-        print(f"  Avg decode:    {stats['avg_decode_ms']:.1f}ms/token")
+        print(f"  Avg decode:    {stats['avg_decode_ms']:.1f}ms/step")
         print(f"  Throughput:    {stats['tokens_per_second']:.2f} tok/s")
-        print(f"  (measured over {stats['num_decode_tokens']} tokens, excluding compile + warmup)")
+        if stats.get("batch_size", 1) > 1:
+            print(f"  Per-user:      {stats['per_user_tok_s']:.2f} tok/s/user")
+        print(f"  (measured over {stats['num_decode_tokens']} steps, excluding compile + warmup)")
     print(f"{'='*60}")
     print(f"\n{output_text}")
 

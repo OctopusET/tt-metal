@@ -16,6 +16,7 @@ struct GatedDeltaNetSharedVariables {
     std::vector<tt::tt_metal::CoreCoord> cores;
     uint32_t num_heads = 0;
     uint32_t head_dim = 0;
+    uint32_t batch_size = 0;
 };
 
 struct GatedDeltaNetProgramFactory {

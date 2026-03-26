@@ -159,7 +159,9 @@ class Qwen35MoE(LightweightModule):
         shared_out = ttnn.mul(shared_out, gate, memory_config=L1)
         ttnn.deallocate(gate)
 
-        # --- Sync: read only 256-float router logits (1 KB) ---
+        # --- Sync: read router logits (row 0 representative for all batch items) ---
+        # For batched decode with same prompt, all rows route identically.
+        # For different prompts, per-row routing would need token grouping (future work).
         logits_cpu = ttnn.to_torch(router_logits).float()[0, 0, 0, : self.num_experts]
         ttnn.deallocate(router_logits)
         topk_vals, topk_ids = torch.topk(logits_cpu, self.num_experts_per_tok)

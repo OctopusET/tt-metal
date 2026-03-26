@@ -34,12 +34,14 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
 
     const auto& state = tensor_args.state;
 
+    const uint32_t BATCH_SIZE = state.padded_shape()[0];
     const uint32_t num_heads = state.padded_shape()[1];
     const uint32_t head_dim = state.padded_shape()[3];
     const uint32_t D_TILES = head_dim / TILE_WIDTH;
     const uint32_t STATE_TILES = D_TILES * D_TILES;
     const uint32_t KEY_DIM_TILES = operation_attributes.key_dim / TILE_WIDTH;
     const uint32_t GQA_RATIO = operation_attributes.gqa_ratio;
+    const uint32_t STATE_BATCH_STRIDE = num_heads * STATE_TILES;
 
     const tt::DataFormat bf16_format = tt::DataFormat::Float16_b;
     const uint32_t bf16_tile_size = tt::tile_size(bf16_format);
@@ -89,6 +91,7 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
     const uint32_t cb_tmp_id = tt::CBIndex::c_25;
     const uint32_t cb_tmp2_id = tt::CBIndex::c_26;
     const uint32_t cb_sd2_id = tt::CBIndex::c_27;
+    const uint32_t cb_out_accum_id = tt::CBIndex::c_28;
 
     create_cb(cb_q_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_k_col_id, D_TILES, bf16_tile_size, bf16_format);
@@ -118,6 +121,7 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
     create_cb(cb_tmp_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_tmp2_id, D_TILES, bf16_tile_size, bf16_format);
     create_cb(cb_sd2_id, STATE_TILES, bf16_tile_size, bf16_format);
+    create_cb(cb_out_accum_id, D_TILES, bf16_tile_size, bf16_format);
 
     auto* conv_out_buffer = tensor_args.conv_out.buffer();
     auto* z_flat_buffer = tensor_args.z_flat.buffer();
@@ -131,25 +135,9 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
 
     // Reader compile-time args
     std::vector<uint32_t> reader_ct_args = {
-        cb_q_id,
-        cb_k_col_id,
-        cb_v_id,
-        cb_k_row_id,
-        cb_b_id,
-        cb_a_id,
-        cb_dt_bias_id,
-        cb_neg_A_exp_id,
-        cb_state_id,
-        D_TILES,
-        STATE_TILES,
-        cb_z_id,
-        cb_norm_w_id,
-        cb_scaler_id,
-        cb_eps_id,
-        cb_scaler_one_id,
-        cb_q_scale_id,
-        KEY_DIM_TILES,
-        GQA_RATIO};
+        cb_q_id,         cb_k_col_id,      cb_v_id,       cb_k_row_id,   cb_b_id,   cb_a_id,      cb_dt_bias_id,
+        cb_neg_A_exp_id, cb_state_id,      D_TILES,       STATE_TILES,   cb_z_id,   cb_norm_w_id, cb_scaler_id,
+        cb_eps_id,       cb_scaler_one_id, cb_q_scale_id, KEY_DIM_TILES, GQA_RATIO, BATCH_SIZE,   STATE_BATCH_STRIDE};
     tt::tt_metal::TensorAccessorArgs(conv_out_buffer).append_to(reader_ct_args);
     tt::tt_metal::TensorAccessorArgs(z_flat_buffer).append_to(reader_ct_args);
     tt::tt_metal::TensorAccessorArgs(ba_flat_buffer).append_to(reader_ct_args);
@@ -159,7 +147,8 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
     tt::tt_metal::TensorAccessorArgs(norm_w_buffer).append_to(reader_ct_args);
 
     // Writer compile-time args
-    std::vector<uint32_t> writer_ct_args = {cb_out_id, cb_state_new_id, D_TILES, STATE_TILES};
+    std::vector<uint32_t> writer_ct_args = {
+        cb_out_id, cb_state_new_id, D_TILES, STATE_TILES, BATCH_SIZE, STATE_BATCH_STRIDE, cb_out_accum_id};
     tt::tt_metal::TensorAccessorArgs(output_buffer).append_to(writer_ct_args);
     tt::tt_metal::TensorAccessorArgs(new_state_buffer).append_to(writer_ct_args);
 
@@ -199,6 +188,7 @@ GatedDeltaNetProgramFactory::cached_program_t GatedDeltaNetProgramFactory::creat
     shared_variables.writer_kernel_id = writer_kernel_id;
     shared_variables.num_heads = num_heads;
     shared_variables.head_dim = head_dim;
+    shared_variables.batch_size = BATCH_SIZE;
     shared_variables.cores = grid_to_cores(num_cores, grid_size.x, grid_size.y, true);
 
     cached_program_t cached_program{std::move(program), std::move(shared_variables)};
@@ -246,7 +236,7 @@ void GatedDeltaNetProgramFactory::override_runtime_arguments(
             sv.cores[i],
             {output.buffer()->address(), new_state.buffer()->address(), i, 1});
 
-        SetRuntimeArgs(program, sv.compute_kernel_id, sv.cores[i], {1});
+        SetRuntimeArgs(program, sv.compute_kernel_id, sv.cores[i], {sv.batch_size});
     }
 }
 
